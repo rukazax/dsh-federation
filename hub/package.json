@@ -1,0 +1,11 @@
+{
+  "name": "@local/dsh-federation",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "dsh_hub — федерация DSH: хаб (этот пакет, роль hub) и узлы (роль node, позже)",
+  "scripts": {
+    "test": "node --test test/hub.test.mjs",
+    "hub": "node src/hub.mjs"
+  }
+}

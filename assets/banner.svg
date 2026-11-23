@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" role="img" aria-label="dsh_hub — федерация DeepSeek Harness">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7aa2ff"/>
+      <stop offset=".55" stop-color="#9d7bff"/>
+      <stop offset="1" stop-color="#4de2c5"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#121a2e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <g stroke="#2b3a5c" stroke-width="2" fill="none" opacity=".9">
+    <path d="M980 96 L1130 160 L980 224"/>
+    <path d="M980 96 L900 160 L980 224"/>
+  </g>
+  <g fill="#7aa2ff">
+    <circle cx="1130" cy="160" r="26"/>
+    <circle cx="900" cy="160" r="18"/>
+    <circle cx="980" cy="96" r="16"/>
+    <circle cx="980" cy="224" r="16"/>
+  </g>
+  <g fill="#4de2c5" opacity=".85">
+    <circle cx="1130" cy="160" r="8"/>
+    <circle cx="900" cy="160" r="6"/>
+  </g>
+  <text x="72" y="132" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="72" font-weight="800" fill="url(#g)" letter-spacing="-1">dsh_hub</text>
+  <text x="74" y="182" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="26" fill="#c9d4ee">Хаб, узлы и телефон: одна федерация твоих DSH</text>
+  <text x="74" y="222" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" fill="#7f8fb3">исполнение — у хозяина · ключи — на хабе · ядро DSH не трогаем</text>
+  <text x="74" y="286" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" fill="#4b5a7d">DeepSeek Harness · federation · Android · foldable</text>
+</svg>
