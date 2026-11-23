@@ -82,18 +82,32 @@ flowchart LR
 
 ## Что уже работает
 
-**Хаб v0** — срез P0/P2: спаривание узлов по коду, `hello`, приём `index`, выдача списков узлов и сессий,
-хранение в SQLite без зависимостей (`node:sqlite`, Node 24).
+Живая федерация, а не макет: хаб-служба на настольном ПК (`0.0.0.0:18990`), узел на втором ПК, общий RAG
+и два телефона. Каждый пункт ниже — с цифрой и способом проверки.
+
+| Что | Итог | Чем доказано |
+| --- | --- | --- |
+| **Хаб v1** | служба `dsh-hub`, SQLite, очередь команд с идемпотентным `commandId`, SSE-поток узлу с курсором, снапшоты, `usage`, аудит, дашборд на `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
+| **Узел** | плагин `@local/dsh-hub-node` на Debian-ПК: `hello`, `index`, сессия создана **из хаба**, `prompt` исполнен **на узле** | тесты **2/2**; в журнале узла `turn/end`, в хабе — `reply{accepted}` и снапшот переписки |
+| **Память** | 374 журнала Windows-ПК влиты в **тот же** `ctxdb.sqlite` | 48 168 чанков отправлено → **21 469 новых** (14 проектов), 29 099 дублей отсеклось по id; поиск по фразе из Windows-сессии отдаёт её первой |
+| **Автоматизация (P2d)** | манифест профиля хаба: **856 скиллов + 3 чек-скрипта**, `sha` на весь набор, выдача файлов по одному, применение командой `automation.apply` | на узле 859 файлов, `sha` совпал, состояние `in-sync`; удалённый скилл вернулся следующим `apply` |
+| **Телефоны** | Redmi 23122PCD1G и HONOR FCP-N49 видят хаб **по локальной сети** (`192.168.88.35:18990`), без `adb reverse` | на обоих `ru.dsh.hub` показывает узел `debian17`; на Redmi открыты его 2 сессии и переписка (4 сообщения) |
 
 ```text
-$ npm test
-✔ спаривание, hello, index и выдача списков
-✔ данные узла переживают перезапуск хаба
-ℹ pass 2 · fail 0
+$ cd hub && npm test
+ℹ tests 9 · pass 9 · fail 0     # хаб: спаривание, SSE-очередь, офлайн-курсор, снапшоты, usage, аудит
+$ cd node && npm test
+ℹ tests 2 · pass 2 · fail 0     # узел: index, prompt у себя, снапшот переписки
 ```
 
-Проверено тестами: чужой код спаривания отбивается `401`, повторный `index` не плодит дубли, списки без
-hub-токена закрыты, данные узла переживают перезапуск.
+Правило версий: контракт `sessionController` у DSH 0.2.1-rc.2 и 0.2.2-rc.5 разный (нет `state`/`wait`,
+`page()` требует `throughSeq`, сообщение лежит то в `data.message`, то прямо в `data`) — узел пробует формы
+по очереди и запоминает **вид** запроса, а не адрес, иначе снапшот одной сессии уезжает в другую.
+
+**Честная оговорка:** ход на узле доходит до модели только при живом лимите провайдера. На стенде он
+упёрся в недельный лимит Z.AI (429 `Weekly/Monthly Limit Exhausted` до 2026-11-25) — транспорт, очередь и
+исполнение проверены, ответ модели ждёт восстановления квоты. Структурное лечение — прокси моделей на хабе
+(P3a), чтобы у узла и телефона вообще не было своих ключей.
 
 ## План
 
@@ -165,7 +179,7 @@ flowchart LR
 
 ```bash
 cd hub
-npm test                                   # 6/6 pass
+npm test                                   # 9/9 pass
 node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite \
   --vault /srv/apps/dsh/obsidian/vault
 ```
@@ -217,11 +231,21 @@ control window — on the desktop and in an Android app.
 
 ### Status
 
-Hub v0 works and is covered by tests: pairing by code, `hello`, `index` ingestion, node/session listings in
-SQLite with no dependencies (`node:sqlite`, Node 24). `npm test` → 2/2 pass. Node plugin, Android app and the
-device service are on the roadmap (see [docs/PLAN.md](docs/PLAN.md)), along with P2d: rolling the hub's
-skills, plugins, dependencies and patches onto every node as one manifest instead of setting each device up by
-hand.
+A live federation, not a mock-up: the hub service on a desktop PC (`0.0.0.0:18990`), a node on a second PC,
+one shared RAG and two phones — each item below carries a number and a way to check it.
+
+| Piece | Result | Evidence |
+| --- | --- | --- |
+| **Hub v1** | `dsh-hub` service, SQLite, idempotent `commandId` queue, SSE stream with a cursor, snapshots, `usage`, audit, dashboard at `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
+| **Node** | `@local/dsh-hub-node` plugin on a Debian PC: `hello`, `index`, a session created **from the hub**, a `prompt` executed **on the node** | tests **2/2**; `turn/end` in the node's journal, `reply{accepted}` plus a chat snapshot in the hub |
+| **Memory** | 374 journals from a Windows PC merged into the **same** `ctxdb.sqlite` | 48,168 chunks sent → **21,469 new** (14 projects), 29,099 duplicates dropped by id; a phrase from a Windows session ranks its session first |
+| **Automation (P2d)** | the hub profile manifest: **856 skills + 3 check scripts**, one `sha` for the set, files served one by one, applied by `automation.apply` | 859 files on the node, matching `sha`, state `in-sync`; a deleted skill came back on the next `apply` |
+| **Phones** | Redmi 23122PCD1G and HONOR FCP-N49 reach the hub **over LAN** (`192.168.88.35:18990`), no `adb reverse` | both show node `debian17`; the Redmi lists its 2 sessions and reads the conversation (4 messages) |
+
+**Honest caveat:** a node turn only reaches the model while the provider quota is alive. On this stand it hit
+Z.AI's weekly limit (429 `Weekly/Monthly Limit Exhausted` until 2026-11-25) — transport, queue and execution
+are verified, the model answer waits for the quota. The structural fix is a model proxy on the hub (P3a), so
+neither a node nor a phone needs a key of its own.
 
 ### Memory and dashboard
 
