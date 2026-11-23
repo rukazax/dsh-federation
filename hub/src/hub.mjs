@@ -4,10 +4,11 @@
 // Обзор базы: --overview-svg out.svg | --overview-json out.json (пишет и выходит, без сервера)
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { openMemoryIngest } from './memory-ingest.mjs';
+import { createLlmGateway } from './llm-gateway.mjs';
 import { fileURLToPath } from 'node:url';
 
 const SCHEMA = `
@@ -104,6 +105,43 @@ CREATE TABLE IF NOT EXISTS audit (
   session TEXT,
   result TEXT,
   detail TEXT
+);
+
+-- Телефон как устройство (ТЗ P2c): своя очередь команд, потому что у него нет SSE-узла.
+CREATE TABLE IF NOT EXISTS devices (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  model        TEXT,
+  android      TEXT,
+  sdk          INTEGER,
+  mode         TEXT NOT NULL DEFAULT 'sandbox',
+  capabilities TEXT,
+  policies     TEXT,
+  token_hash   TEXT NOT NULL UNIQUE,
+  created_at   TEXT NOT NULL,
+  last_seen    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS device_commands (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  command_id TEXT NOT NULL UNIQUE,
+  device     TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  payload    TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  state      TEXT NOT NULL DEFAULT 'queued',
+  result     TEXT,
+  error      TEXT,
+  done_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS device_commands_by_device ON device_commands(device, state);
+
+-- Токены шлюза моделей (P3a): узел ходит к хабу, а не к провайдеру со своим ключом.
+CREATE TABLE IF NOT EXISTS llm_tokens (
+  key_hash   TEXT PRIMARY KEY,
+  target     TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'node',
+  created_at TEXT NOT NULL
 );
 `;
 
@@ -408,7 +446,7 @@ export function buildAutomationManifest({ homeDir, skillsDir, checkDir } = {}) {
   };
 }
 
-export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', vaultPath = process.env.DSH_OBSIDIAN_VAULT || '' } = {}) {  const db = new DatabaseSync(dbPath);
+export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', vaultPath = process.env.DSH_OBSIDIAN_VAULT || '', llmUpstream = process.env.DSH_LLM_UPSTREAM || undefined, llmAllow = null, credentialsPaths = [] } = {}) {  const db = new DatabaseSync(dbPath);
   db.exec(SCHEMA);
   // старые БД v0 не знают новых колонок: добираем, а не пересоздаём базу
   for (const col of ['snapshot_at TEXT', 'seq INTEGER']) {
@@ -431,6 +469,56 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
     db.prepare('INSERT INTO audit (ts, actor, node, action, session, result, detail) VALUES (?,?,?,?,?,?,?)')
       .run(iso(), actor ?? null, node ?? null, action, session ?? null, result ?? null,
         detail === undefined ? null : JSON.stringify(detail));
+
+  // ── Телефон как устройство (ТЗ P2c): регистрация, очередь команд, ожидание ответа.
+  // Агент не получает прав устройства: он просит, приложение проверяет режим и политику.
+  const PHONE_KINDS = ['screenshot', 'ui_tree', 'tap', 'swipe', 'text', 'key', 'launch', 'shell', 'stop'];
+  const deviceByToken = (req) => {
+    const t = bearer(req);
+    if (!t) return null;
+    return db.prepare('SELECT * FROM devices WHERE token_hash = ?').get(sha256(t)) || null;
+  };
+  const touchDevice = (id) => db.prepare('UPDATE devices SET last_seen = ? WHERE id = ?').run(iso(), id);
+  /** Кто вправе просить телефон: сам хаб (viewer) или доверенный узел федерации. */
+  const caller = (req) => {
+    if (hubToken && bearer(req) === hubToken) return { actor: 'viewer', node: null };
+    const n = nodeByToken(req);
+    return n ? { actor: `node:${n.name}`, node: n.id } : null;
+  };
+  const waiting = new Map();
+  const settle = (commandId, value) => {
+    const list = waiting.get(commandId);
+    if (!list) return;
+    waiting.delete(commandId);
+    for (const resolve of list) resolve(value);
+  };
+  const waitFor = (commandId, ms) =>
+    new Promise((resolve) => {
+      const done = setTimeout(() => {
+        waiting.delete(commandId);
+        resolve(null);
+      }, ms);
+      const settleOnce = (v) => {
+        clearTimeout(done);
+        resolve(v);
+      };
+      const list = waiting.get(commandId) || [];
+      list.push(settleOnce);
+      waiting.set(commandId, list);
+    });
+  const commandRow = (id) => db.prepare('SELECT * FROM device_commands WHERE command_id = ?').get(id);
+  const commandView = (r) =>
+    r && {
+      commandId: r.command_id, device: r.device, kind: r.kind, state: r.state,
+      created_at: r.created_at, done_at: r.done_at,
+      result: r.result ? JSON.parse(r.result) : null, error: r.error || null
+    };
+  const expireDevice = () =>
+    db.prepare(`UPDATE device_commands SET state = 'expired', done_at = ? WHERE state = 'queued' AND expires_at IS NOT NULL AND expires_at < ?`)
+      .run(iso(), iso()).changes;
+
+  // Шлюз моделей: единственные ворота наружу. Ключи провайдера остаются на хабе.
+  const llm = createLlmGateway({ db, upstream: llmUpstream, allow: llmAllow, logAudit, credentialsPaths });
 
   // ── SSE: у каждого узла свой набор живых потоков. Команда уходит сразу, если узел на связи,
   // иначе ждёт в commands до TTL — узел заберёт по курсору при переподключении.
@@ -897,6 +985,151 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       return [200, { ok: true, ...cmd }];
     },
 
+    // ── Телефон как устройство: регистрация, выдача команд, приём ответа ──
+    'POST /fed/v1/device/hello': async (req) => {
+      const body = await readJson(req);
+      const existing = deviceByToken(req);
+      const info = body.device || {};
+      const mode = ['sandbox', 'assist', 'full'].includes(body.mode) ? body.mode : 'sandbox';
+      // Не прислали возможности — оставляем прежние: hello раз в 30 с не должен обнулять карточку.
+      const caps = body.capabilities ? JSON.stringify(body.capabilities) : null;
+      const policies = body.policies ? JSON.stringify(body.policies) : null;
+      if (existing) {
+        db.prepare('UPDATE devices SET name=?, model=?, android=?, sdk=?, mode=?, capabilities=?, policies=?, last_seen=? WHERE id=?')
+          .run(String(info.name || existing.name), info.model || existing.model, info.android || existing.android,
+            Number.isFinite(info.sdk) ? info.sdk : existing.sdk, mode, caps ?? existing.capabilities,
+            policies ?? existing.policies, iso(), existing.id);
+        return [200, { ok: true, deviceId: existing.id, mode, allow: PHONE_KINDS }];
+      }
+      if (!hubToken || bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      if (!info.name) return [400, { ok: false, error: 'device.name required' }];
+      const token = randomBytes(24).toString('hex');
+      const id = 'device_' + randomBytes(4).toString('hex');
+      db.prepare(
+        `INSERT INTO devices (id, name, model, android, sdk, mode, capabilities, policies, token_hash, created_at, last_seen)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).run(id, String(info.name), info.model || null, info.android || null, Number.isFinite(info.sdk) ? info.sdk : null,
+        mode, caps, policies, sha256(token), iso(), iso());
+      logAudit('device', id, 'device.hello', null, 'paired', { mode, name: info.name });
+      return [200, { ok: true, deviceId: id, token, mode, allow: PHONE_KINDS }];
+    },
+
+    'GET /fed/v1/device/commands': async (req, url) => {
+      const dev = deviceByToken(req);
+      if (!dev) return [401, { ok: false, error: 'unknown-device' }];
+      touchDevice(dev.id);
+      expireDevice();
+      const cursor = Number(url.searchParams.get('cursor') || 0);
+      const waitMs = Math.min(25_000, Math.max(0, Number(url.searchParams.get('wait') || 0)));
+      const deadline = Date.now() + waitMs;
+      for (;;) {
+        const rows = db.prepare(`SELECT * FROM device_commands WHERE device = ? AND seq > ? AND state = 'queued' ORDER BY seq`)
+          .all(dev.id, cursor);
+        if (rows.length || Date.now() >= deadline) {
+          return [200, {
+            ok: true,
+            cursor: rows.length ? rows[rows.length - 1].seq : cursor,
+            commands: rows.map((r) => ({ seq: r.seq, commandId: r.command_id, kind: r.kind, payload: JSON.parse(r.payload || '{}') })),
+            mode: dev.mode
+          }];
+        }
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    },
+
+    'POST /fed/v1/device/reply': async (req) => {
+      const dev = deviceByToken(req);
+      if (!dev) return [401, { ok: false, error: 'unknown-device' }];
+      const body = await readJson(req);
+      const row = body.commandId ? commandRow(String(body.commandId)) : null;
+      if (!row || row.device !== dev.id) return [404, { ok: false, error: 'unknown-command' }];
+      if (row.state === 'queued' || row.state === 'sent') {
+        const state = body.ok ? 'done' : 'error';
+        db.prepare('UPDATE device_commands SET state=?, result=?, error=?, done_at=? WHERE command_id=?')
+          .run(state, body.result === undefined ? null : JSON.stringify(body.result), body.error ? String(body.error) : null, iso(), row.command_id);
+        logAudit('device', dev.id, `phone.${row.kind}`, null, state, body.error ? { error: body.error } : undefined);
+        settle(row.command_id, { commandId: row.command_id, kind: row.kind, ok: !!body.ok, result: body.result ?? null, error: body.error ?? null });
+      }
+      touchDevice(dev.id);
+      return [200, { ok: true }];
+    },
+
+    // ── Что видит агент и панель: устройства и запрос к телефону ──
+    'GET /api/federation/devices': (req) => {
+      const who = caller(req);
+      if (!who) return [401, { ok: false, error: 'hub-token-required' }];
+      const rows = db.prepare('SELECT * FROM devices ORDER BY last_seen DESC').all();
+      const now = Date.now();
+      return [200, {
+        ok: true,
+        devices: rows.map((r) => ({
+          id: r.id, name: r.name, model: r.model, android: r.android, mode: r.mode,
+          capabilities: JSON.parse(r.capabilities || '{}'),
+          policies: JSON.parse(r.policies || '{}'),
+          online: now - Date.parse(r.last_seen) < 90_000,
+          last_seen: r.last_seen, created_at: r.created_at
+        }))
+      }];
+    },
+
+    'POST /api/federation/phone': async (req) => {
+      const who = caller(req);
+      if (!who) return [401, { ok: false, error: 'hub-token-required' }];
+      const body = await readJson(req);
+      const kind = String(body.kind || '');
+      if (!PHONE_KINDS.includes(kind)) return [400, { ok: false, error: `unknown-kind:${kind}`, allow: PHONE_KINDS }];
+      const now = Date.now();
+      const devices = db.prepare('SELECT * FROM devices').all();
+      const online = devices.filter((d) => now - Date.parse(d.last_seen) < 90_000);
+      const dev = body.device ? devices.find((d) => d.id === body.device) : online[0];
+      if (!dev) return [409, { ok: false, error: devices.length ? 'device-offline' : 'no-device' }];
+      const commandId = randomUUID();
+      const ttl = kind === 'shell' ? 90 : 60;
+      const expiresAt = new Date(now + ttl * 1000).toISOString();
+      db.prepare(
+        `INSERT INTO device_commands (command_id, device, kind, payload, created_at, expires_at, state)
+         VALUES (?,?,?,?,?,?, 'queued')`
+      ).run(commandId, dev.id, kind, JSON.stringify(body.payload ?? {}), iso(), expiresAt);
+      logAudit(who.actor, dev.id, `phone.${kind}`, null, 'queued', body.payload ? { payload: body.payload } : undefined);
+      const waitMs = Math.min(90_000, Math.max(0, Number(body.waitMs ?? 15_000)));
+      const value = waitMs ? await waitFor(commandId, waitMs) : null;
+      const row = commandRow(commandId);
+      if (!value && !waitMs) return [200, { ok: true, accepted: true, commandId, device: dev.id, state: row.state }];
+      if (!value) {
+        return [202, { ok: false, pending: true, commandId, device: dev.id, state: row.state, error: row.error || 'timeout' }];
+      }
+      return [value.ok ? 200 : 422, { ok: value.ok, commandId, device: dev.id, kind, result: value.result, error: value.error }];
+    },
+
+    'GET /api/federation/phone/result': (req, url) => {
+      const who = caller(req);
+      if (!who) return [401, { ok: false, error: 'hub-token-required' }];
+      const row = commandRow(String(url.searchParams.get('commandId') || ''));
+      if (!row) return [404, { ok: false, error: 'unknown-command' }];
+      return [200, { ok: true, ...commandView(row) }];
+    },
+
+    // ── Токен шлюза моделей: узлу не нужен ключ провайдера, только пропуск на хаб ──
+    'POST /api/federation/node/llm-token': async (req) => {
+      if (!hubToken || bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const body = await readJson(req);
+      const target = String(body.node || '');
+      if (!target) return [400, { ok: false, error: 'node required' }];
+      const token = llm.mint(target, 'node');
+      logAudit('viewer', target, 'llm.token-issued', null, 'ok');
+      return [200, { ok: true, node: target, token, models: llm.models, baseURL: '/llm' }];
+    },
+
+    'GET /api/federation/llm/stats': (req) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      return [200, {
+        ok: true,
+        models: llm.models,
+        by_node: db.prepare('SELECT node, count(*) calls, sum(in_tokens) i, sum(out_tokens) o FROM usage WHERE provider = ? GROUP BY node').all('deepseek-account'),
+        recent: db.prepare('SELECT node, model, ts, in_tokens, out_tokens, status, ms FROM usage WHERE provider = ? ORDER BY ts DESC LIMIT 20').all('deepseek-account')
+      }];
+    },
+
     'GET /api/federation/audit': (req, url) => {
       if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
       const limit = Math.min(500, Number(url.searchParams.get('limit') || 100));
@@ -931,6 +1164,16 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
     const key = `${req.method} ${url.pathname}`;
     if (req.method === 'GET' && url.pathname === '/') return sendText(res, 200, 'text/html; charset=utf-8', dashboardHtml());
     if (req.method === 'GET' && url.pathname === '/fed/v1/stream') return handleStream(req, res, url);
+    // Шлюз моделей сам отвечает и сам решает, его ли путь: /llm/v1/messages
+    if (url.pathname.startsWith('/llm/')) {
+      try {
+        await llm.handle(req, res, url);
+      } catch (e) {
+        if (!res.headersSent) json(res, 502, { type: 'error', error: { type: 'api_error', message: `hub gateway: ${e.message}` } });
+        else res.end();
+      }
+      return;
+    }
     const handler = routes[key];
     if (!handler) return json(res, 404, { ok: false, error: 'not-found' });
     try {
@@ -975,7 +1218,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     process.exit(0);
   }
-  const hub = createHub({ dbPath, pairCode: code, hubToken, vaultPath });
+  const hub = createHub({
+    dbPath, pairCode: code, hubToken, vaultPath,
+    llmUpstream: process.env.DSH_LLM_UPSTREAM || undefined,
+    credentialsPaths: process.env.DSH_CREDENTIALS_FILE ? [process.env.DSH_CREDENTIALS_FILE] : []
+  });
   hub.server.listen(port, host, () => {
     console.log(`dsh_hub listening http://${host}:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
   });

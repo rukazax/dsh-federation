@@ -138,6 +138,97 @@ export function apply(ctx) {
     return res.json();
   };
 
+  // ── Телефон как устройство (ТЗ P2c). Агент просит, а решает приложение на телефоне:
+  // режим sandbox/assist/full, политика инструмента, подтверждение и аудит живут там.
+  // Здесь только транспорт: хаб `/api/federation/phone` и разбор ответа.
+  const phone = async (kind, payload = {}, waitMs = 20_000) => {
+    const out = await api('POST', '/api/federation/phone', { kind, payload, waitMs }, waitMs + 10_000);
+    if (!out.ok && out.error) throw new Error(`${kind}: ${out.error}`);
+    return out;
+  };
+  const devices = async () => (await api('GET', '/api/federation/devices')).devices || [];
+
+  const phoneDir = path.join(DIR, 'phone');
+
+  /** Инструменты, если у этой версии DSH есть служба tools. Импорт defineTool — из установки DSH. */
+  const registerPhoneTools = async () => {
+    // tools спрашиваем необязательно: без него узел живёт как раньше, инструменты просто не появятся
+    const tools = (typeof ctx.get === 'function' ? ctx.get('tools') : null) ?? ctx.tools;
+    if (!tools) return 0;
+    let defineTool = null;
+    try {
+      const root = path.join(path.dirname(process.argv[1] || ''), '..', 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib', 'index.js');
+      defineTool = (await import(new URL(`file://${root}`).href)).defineTool;
+    } catch (e) {
+      try {
+        defineTool = (await import('@deepseek-ai/dsh-tools')).defineTool;
+      } catch {
+        trace(`инструменты телефона: dsh-tools не найден (${e.message})`);
+        return 0;
+      }
+    }
+    const render = (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 1) }];
+    const str = (description) => ({ type: 'string', description });
+    const num = (description) => ({ type: 'number', description });
+    const tool = (name, description, properties, execute) =>
+      defineTool({
+        name,
+        description,
+        // простое поле→описание: DSH сам собирает из этого JSON Schema
+        parameters: properties,
+        output: { schema: { type: 'object', additionalProperties: true }, render },
+        timeoutMs: 120_000,
+        execute
+      });
+
+    const list = tool('phone_devices', 'Показать телефоны-устройства федерации: имя, режим доступа (sandbox/assist/full), возможности, когда были на связи. С этого начинают: без устройства команды некуда слать.', {}, async () => {
+      const list = await devices();
+      if (!list.length) return { devices: [], hint: 'нителефон не зарегистрирован: открой приложение ru.dsh.hub на телефоне и включи службу устройства' };
+      return { devices: list.map((d) => ({ id: d.id, name: d.name, mode: d.mode, online: d.online, capabilities: d.capabilities, last_seen: d.last_seen })) };
+    });
+
+    const screenshot = tool('phone_screenshot', 'Снять экран телефона и сохранить JPEG на этом узле. Возвращает путь к файлу, ширину и высоту — дальше смотри картинку инструментом чтения изображений.', { maxWidth: num('Ширина в пикселях, по умолчанию 720') }, async (args) => {
+      const out = await phone('screenshot', { maxWidth: args.maxWidth || 720 });
+      const r = out.result || {};
+      fs.mkdirSync(phoneDir, { recursive: true });
+      const file = path.join(phoneDir, `shot-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`);
+      fs.writeFileSync(file, Buffer.from(String(r.data || ''), 'base64'));
+      return { path: file, width: r.width, height: r.height, bytes: fs.statSync(file).size, device: out.device };
+    });
+
+    const uiTree = tool('phone_ui_tree', 'Дерево интерфейса телефона: текст, описания, границы и кликабельность элементов. Нужно, чтобы попадать по смыслу, а не по пикселям.', { maxNodes: num('Сколько узлов вернуть, по умолчанию 200') }, async (args) => phone('ui_tree', { maxNodes: args.maxNodes || 200 }));
+
+    const tap = tool('phone_tap', 'Тап по телефону: либо координаты x/y, либо текст на экране (ищется по подписи и уходит в кликабельный предок). Возвращает, что оказалось в фокусе после тапа.', {
+      x: num('Координата X'), y: num('Координата Y'), text: str('Подстрока подписи элемента на экране')
+    }, async (args) => phone('tap', { x: args.x, y: args.y, text: args.text }));
+
+    const swipe = tool('phone_swipe', 'Свайп по экрану телефона от точки к точке.', {
+      x1: num('Начало X'), y1: num('Начало Y'), x2: num('Конец X'), y2: num('Конец Y'), ms: num('Длительность, мс')
+    }, async (args) => phone('swipe', args, 20_000));
+
+    const text = tool('phone_text', 'Ввести текст в поле, которое сейчас в фокусе на телефоне.', { text: str('Текст для ввода') }, async (args) => phone('text', args));
+
+    const key = tool('phone_key', 'Нажать системную клавишу телефона: back, home, recents, notifications, enter.', { key: str('back | home | recents | notifications | enter') }, async (args) => phone('key', args));
+
+    const launch = tool('phone_launch', 'Открыть приложение на телефоне по имени пакета.', { pkg: str('Имя пакета, например com.android.settings') }, async (args) => phone('launch', args));
+
+    const shell = tool('phone_shell', 'Выполнить shell-команду на телефоне. Доступно только в режиме full (нужен Shizuku); иначе честный отказ full-unavailable. По умолчанию требует подтверждения на телефоне.', { cmd: str('Команда') }, async (args) => phone('shell', args, 90_000));
+
+    const stop = tool('phone_stop', 'Стоп-кран: телефон перестаёт исполнять команды агента до явного «Пуск» в приложении.', {}, async () => phone('stop', {}));
+
+    let n = 0;
+    for (const t of [list, screenshot, uiTree, tap, swipe, text, key, launch, shell, stop]) {
+      try {
+        tools.register(t);
+        n++;
+      } catch (e) {
+        trace(`инструмент ${t.name} не зарегистрирован: ${e.message}`);
+      }
+    }
+    trace(`инструменты телефона: ${n} зарегистрировано`);
+    return n;
+  };
+
   const sc = () => ctx.sessionController;
 
   const pushIndex = async () => {
@@ -467,5 +558,6 @@ export function apply(ctx) {
   };
 
   void start();
+  void registerPhoneTools().catch((e) => trace(`инструменты телефона: ${e.message}`));
   ctx.logger?.info?.(`[dsh-hub-node] узел ${pair.name || os.hostname()} → ${hub}`);
 }

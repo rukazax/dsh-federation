@@ -4,22 +4,31 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { createHub, overviewSvg, vaultOverview } from '../src/hub.mjs';
 
 async function started(hub) {
   await new Promise((r) => hub.server.listen(0, '127.0.0.1', r));
   const port = hub.server.address().port;
   const base = `http://127.0.0.1:${port}`;
-  const call = async (method, path, body, token) => {
+  const call = async (method, path, body, token, extra = {}) => {
     const res = await fetch(base + path, {
       method,
       headers: {
         'content-type': 'application/json',
-        ...(token ? { authorization: `Bearer ${token}` } : {})
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...extra
       },
       body: body ? JSON.stringify(body) : undefined
     });
-    return { status: res.status, body: await res.json() };
+    const raw = await res.text();
+    let parsed = null;
+    try {
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch {
+      parsed = raw;
+    }
+    return { status: res.status, body: parsed, raw };
   };
   return { base, call };
 }
@@ -317,5 +326,160 @@ test('снапшот и usage: переписка читается, токены
     assert.equal(stats.body.by_model[0].model, 'glm-5.3-flash');
   } finally {
     hub.close();
+  }
+});
+
+// ── P2c: телефон как устройство. Гейт ТЗ: команда доходит до устройства и ответ возвращается
+// запросившему; чужой токен не пускается; неизвестный вид команды отбивается списком.
+test('телефон: регистрация по коду хаба, команда и ответ, чужой токен не пускается', async () => {
+  const hub = createHub({ hubToken: 'HUB' });
+  const { call } = await started(hub);
+  try {
+    const noToken = await call('POST', '/fed/v1/device/hello', { device: { name: 'Redmi' } });
+    assert.equal(noToken.status, 401);
+
+    const hello = await call('POST', '/fed/v1/device/hello', {
+      proto: 1,
+      device: { name: 'Redmi 23122PCD1G', model: '23122PCD1G', android: '16', sdk: 36 },
+      mode: 'assist',
+      capabilities: { screenshot: true, tap: true, shell: false, full: false },
+      policies: { shell: 'ask', launch: 'auto' }
+    }, 'HUB');
+    assert.equal(hello.status, 200);
+    assert.match(hello.body.deviceId, /^device_[0-9a-f]{8}$/);
+    const token = hello.body.token;
+    assert.match(token, /^[0-9a-f]{48}$/);
+    assert.ok(hello.body.allow.includes('screenshot'));
+
+    // повторный hello с токеном устройства сохраняет тот же id и обновляет режим
+    const again = await call('POST', '/fed/v1/device/hello', { device: { name: 'Redmi' }, mode: 'sandbox' }, token);
+    assert.equal(again.status, 200);
+    assert.equal(again.body.deviceId, hello.body.deviceId);
+    assert.equal(again.body.mode, 'sandbox');
+
+    const devices = await call('GET', '/api/federation/devices', null, 'HUB');
+    assert.equal(devices.body.devices.length, 1);
+    assert.equal(devices.body.devices[0].mode, 'sandbox');
+    assert.equal(devices.body.devices[0].online, true);
+    assert.equal(devices.body.devices[0].capabilities.tap, true);
+
+    // запрос к телефону висит до ответа устройства и возвращает результат
+    const request = call('POST', '/api/federation/phone', { kind: 'screenshot', waitMs: 5000 }, 'HUB');
+    await new Promise((r) => setTimeout(r, 150));
+    const polled = await call('GET', '/fed/v1/device/commands?cursor=0&wait=0', null, token);
+    assert.equal(polled.body.commands.length, 1);
+    assert.equal(polled.body.commands[0].kind, 'screenshot');
+    const commandId = polled.body.commands[0].commandId;
+
+    const reply = await call('POST', '/fed/v1/device/reply', {
+      commandId, ok: true, result: { format: 'jpeg', width: 720, height: 1600, data: 'AAAA' }
+    }, token);
+    assert.equal(reply.status, 200);
+
+    const answered = await request;
+    assert.equal(answered.status, 200);
+    assert.equal(answered.body.ok, true);
+    assert.equal(answered.body.result.width, 720);
+
+    // курсор дальше — команда не приходит повторно
+    const noMore = await call('GET', '/fed/v1/device/commands?cursor=1&wait=0', null, token);
+    assert.equal(noMore.body.commands.length, 0);
+
+    // неизвестный вид — 400 со списком разрешённых
+    const badKind = await call('POST', '/api/federation/phone', { kind: 'selfdestruct' }, 'HUB');
+    assert.equal(badKind.status, 400);
+    assert.ok(Array.isArray(badKind.body.allow));
+
+    // ответ без регистрации/с чужим токеном — 401
+    assert.equal((await call('GET', '/api/federation/devices')).status, 401);
+    assert.equal((await call('GET', '/fed/v1/device/commands?cursor=0')).status, 401);
+    assert.equal((await call('POST', '/api/federation/phone', { kind: 'tap' }, 'NOPE')).status, 401);
+
+    // ошибка исполнения доходит как ok:false с кодом причины
+    const denyReq = call('POST', '/api/federation/phone', { kind: 'ui_tree', waitMs: 5000 }, 'HUB');
+    await new Promise((r) => setTimeout(r, 150));
+    const second = await call('GET', '/fed/v1/device/commands?cursor=1&wait=0', null, token);
+    await call('POST', '/fed/v1/device/reply', { commandId: second.body.commands[0].commandId, ok: false, error: 'mode-sandbox' }, token);
+    const denied = await denyReq;
+    assert.equal(denied.status, 422);
+    assert.equal(denied.body.error, 'mode-sandbox');
+    assert.equal(denied.body.result, null);
+  } finally {
+    hub.close();
+  }
+});
+
+// ── P3a: шлюз моделей. Гейт ТЗ: запрещённая модель → 403 и запись в аудит,
+// разрешённая уходит в провайдера с токеном хаба, а usage ложится в журнал.
+test('шлюз моделей: 403 на запрещённую, пересылка разрешённой и учёт usage', async () => {
+  const seen = [];
+  const fake = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen.push({ url: req.url, auth: req.headers['x-dsh-auth-token'], body: JSON.parse(body) });
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":11,"output_tokens":1}}}\n\n');
+      res.write('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":22}}\n\n');
+      res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+    });
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  const upstream = `http://127.0.0.1:${fake.address().port}`;
+
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-cred-'));
+  const credFile = join(dir, '.credentials.yaml');
+  writeFileSync(credFile, [
+    'version: 1',
+    'records:',
+    '  deepseek-account-platform/default:',
+    '    kind: grant',
+    '    payload:',
+    '      version: 1',
+    '      token: TOKEN-FROM-HUB',
+    '      issuer: https://platform.deepseek.com',
+    ''
+  ].join('\n'));
+
+  const hub = createHub({ hubToken: 'HUB', llmUpstream: upstream, credentialsPaths: [credFile] });
+  const { base, call } = await started(hub);
+  try {
+    const minted = await call('POST', '/api/federation/node/llm-token', { node: 'node_1' }, 'HUB');
+    assert.equal(minted.status, 200);
+    assert.deepEqual(minted.body.models, ['deepseek-flash', 'deepseek-v4-pro']);
+    const key = minted.body.token;
+
+    const refused = await call('POST', '/llm/v1/messages', { model: 'gpt-whatever', messages: [] }, null, { 'x-api-key': key });
+    assert.equal(refused.status, 403);
+    assert.match(JSON.stringify(refused.body), /not allowed/);
+    assert.equal(seen.length, 0, 'запрещённый запрос не должен уходить наружу');
+
+    const ok = await call('POST', '/llm/v1/messages', { model: 'deepseek-flash', messages: [] }, null, { 'x-api-key': key });
+    assert.equal(ok.status, 200);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].url, '/v1/messages');
+    assert.equal(seen[0].auth, 'TOKEN-FROM-HUB', 'наружу уходит токен аккаунта хаба, а не токен узла');
+    assert.match(ok.raw, /message_stop/);
+
+    // usage записан и привязан к узлу, аудит вызова и отказа на месте
+    const stats = await call('GET', '/api/federation/llm/stats', null, 'HUB');
+    assert.equal(stats.body.by_node.length, 1);
+    assert.equal(stats.body.by_node[0].node, 'node_1');
+    assert.equal(stats.body.by_node[0].calls, 2); // 403 тоже учитывается
+    const calls = stats.body.by_node[0];
+    assert.equal(calls.i, 11);
+    assert.equal(calls.o, 22);
+
+    const audit = await call('GET', '/api/federation/audit?limit=20', null, 'HUB');
+    const actions = audit.body.audit.map((a) => a.action);
+    assert.ok(actions.includes('llm.deny'));
+    assert.ok(actions.includes('llm.call'));
+
+    // чужой ключ — 401
+    const foreign = await call('POST', '/llm/v1/messages', { model: 'deepseek-flash' }, null, { 'x-api-key': 'nope' });
+    assert.equal(foreign.status, 401);
+  } finally {
+    hub.close();
+    fake.close();
   }
 });
