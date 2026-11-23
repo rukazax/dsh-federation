@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const name = 'dsh-hub-node';
 export const inject = ['sessionController'];
@@ -267,6 +267,61 @@ export function apply(ctx) {
     return null;
   };
 
+  const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+
+  /**
+   * Раскатка автоматизации: манифест профиля хаба → локальный профиль узла.
+   * Только файлы (скиллы и чек-скрипты): патчи ядра требуют root и остаются ручным шагом.
+   * Пишем через временный файл и rename — полу-состояния не бывает.
+   */
+  const applyAutomation = async () => {
+    const manifest = await api('GET', '/fed/v1/automation/manifest');
+    const drift = [];
+    let written = 0;
+    let skipped = 0;
+    for (const f of manifest.files || []) {
+      if (!f.path || f.path.includes('..')) continue;
+      const dest = path.join(HOME, f.path);
+      let local = null;
+      try {
+        local = sha256(fs.readFileSync(dest));
+      } catch {
+        local = null;
+      }
+      if (local === f.sha256) {
+        skipped++;
+        continue;
+      }
+      const raw = await fetch(`${hub}/fed/v1/automation/file?path=${encodeURIComponent(f.path)}`, {
+        headers: { authorization: `Bearer ${pair.token}` }
+      });
+      if (!raw.ok) {
+        drift.push({ path: f.path, reason: `fetch ${raw.status}` });
+        continue;
+      }
+      const buf = Buffer.from(await raw.arrayBuffer());
+      if (sha256(buf) !== f.sha256) {
+        drift.push({ path: f.path, reason: 'sha-mismatch' });
+        continue;
+      }
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      const tmp = `${dest}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, dest);
+      written++;
+      if (local !== null) drift.push({ path: f.path, reason: 'outdated' });
+    }
+    await api('POST', '/fed/v1/automation/report', {
+      applied_sha: manifest.sha,
+      dsh_version: process.env.DSH_VERSION || null,
+      drift
+    });
+    state.automation = { applied_sha: manifest.sha, at: new Date().toISOString(), written, skipped };
+    saveState();
+    trace(`automation: sha=${manifest.sha} записано ${written}, без изменений ${skipped}, дрейф ${drift.length}`);
+    return { applied_sha: manifest.sha, written, skipped, drift };
+  };
+
   const handle = async (ev) => {
     if (executed.has(ev.commandId)) {
       trace(`повтор команды ${ev.commandId} — пропускаю`);
@@ -306,6 +361,9 @@ export function apply(ctx) {
         const sessionId = created?.session?.sessionId ?? created?.sessionId ?? null;
         await api('POST', '/fed/v1/reply', { commandId: ev.commandId, ok: true, result: { sessionId } });
         void pushIndex().catch(() => {});
+      } else if (ev.kind === 'automation.apply') {
+        const result = await applyAutomation();
+        await api('POST', '/fed/v1/reply', { commandId: ev.commandId, ok: true, result });
       } else if (ev.kind === 'index') {
         const n = await pushIndex();
         await api('POST', '/fed/v1/reply', { commandId: ev.commandId, ok: true, result: { sessions: n } });

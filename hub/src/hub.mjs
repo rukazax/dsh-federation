@@ -6,7 +6,8 @@ import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
+import { openMemoryIngest } from './memory-ingest.mjs';
 import { fileURLToPath } from 'node:url';
 
 const SCHEMA = `
@@ -73,6 +74,25 @@ CREATE TABLE IF NOT EXISTS usage (
   cost_usd   TEXT,
   status     TEXT,
   ms         INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS memory_ingest (
+  node  TEXT NOT NULL,
+  day   TEXT NOT NULL,
+  chunks INTEGER NOT NULL DEFAULT 0,
+  dupes INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (node, day)
+);
+
+CREATE TABLE IF NOT EXISTS node_automation (
+  node       TEXT PRIMARY KEY,
+  applied_sha TEXT,
+  dsh_version TEXT,
+  state      TEXT,
+  drift      TEXT,
+  last_error TEXT,
+  applied_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit (
@@ -325,6 +345,67 @@ if(TOK) reloadAll(); else $('state').textContent='нужен hub-token';
 </script></body></html>`;
 }
 
+/**
+ * Манифест автоматизации: что хаб раскатывает на узлы.
+ *
+ * Это профиль хаба, а не отдельный реестр (docs/FEDERATION.md §9): скиллы из $DSH_HOME/skills
+ * и чек-скрипты. Патчи ядра сюда не входят — их применение требует root на узле, поэтому они
+ * остаются ручным шагом; врать «применили» хуже, чем честно не привозить.
+ */
+export function buildAutomationManifest({ homeDir, skillsDir, checkDir } = {}) {
+  const home = homeDir || process.env.DSH_HOME || '/srv/apps/dsh/dsh-home';
+  const skills = skillsDir || join(home, 'skills');
+  const checks = checkDir || '/srv/apps/dsh/workspaces/pc_admin/scripts';
+  const files = [];
+  const walk = (root, prefix, kind) => {
+    if (!existsSync(root)) return;
+    const stack = [root];
+    while (stack.length) {
+      const dir = stack.pop();
+      let entries;
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) stack.push(full);
+        else if (e.isFile()) {
+          try {
+            const buf = readFileSync(full);
+            files.push({
+              kind,
+              path: prefix + '/' + full.slice(root.length + 1).split(sep).join('/'),
+              sha256: sha256(buf),
+              bytes: buf.length
+            });
+          } catch {
+            /* нечитаемый файл в манифест не попадает */
+          }
+        }
+      }
+    }
+  };
+  walk(skills, 'skills', 'skill');
+  for (const name of ['check-plugin-manager-enabled.mjs', 'check-bash-description.mjs', 'check-local-package-names.mjs']) {
+    const full = join(checks, name);
+    if (!existsSync(full)) continue;
+    const buf = readFileSync(full);
+    files.push({ kind: 'check', path: 'checks/' + name, sha256: sha256(buf), bytes: buf.length });
+  }
+  files.sort((a, b) => (a.path < b.path ? -1 : 1));
+  const sha = sha256(JSON.stringify(files.map((f) => [f.path, f.sha256])));
+  return {
+    sha,
+    proto: 1,
+    dsh_version: process.env.DSH_VERSION || null,
+    created_at: iso(),
+    counts: { skill: files.filter((f) => f.kind === 'skill').length, check: files.filter((f) => f.kind === 'check').length },
+    files
+  };
+}
+
 export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', vaultPath = process.env.DSH_OBSIDIAN_VAULT || '' } = {}) {  const db = new DatabaseSync(dbPath);
   db.exec(SCHEMA);
   // старые БД v0 не знают новых колонок: добираем, а не пересоздаём базу
@@ -562,6 +643,117 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       return [200, { ok: true, stored, skipped: calls.length - stored }];
     },
 
+    // Память федерации: чанки узла/импортёра ложатся в ОДИН ctxdb хаба (docs/FEDERATION.md §6).
+    'POST /fed/v1/memory': async (req) => {
+      const node = nodeByToken(req);
+      const isHub = hubToken && bearer(req) === hubToken;
+      if (!node && !isHub) return [401, { ok: false, error: 'unknown-node' }];
+      const owner = node?.id || 'hub-import';
+      const body = await readJson(req, 32 << 20);
+      const chunks = Array.isArray(body.chunks) ? body.chunks : [];
+      const ingest = await openMemoryIngest();
+      let stored = 0;
+      let dupes = 0;
+      let bytes = 0;
+      for (const c of chunks) {
+        if (!c || typeof c.text !== 'string') continue;
+        const verdict = ingest.add({
+          kind: c.kind || 'chat_user',
+          text: c.text,
+          project: c.project || c.workspace || '',
+          session: c.session || '',
+          turn: Number.isFinite(c.turn) ? c.turn : 0,
+          ts: c.ts
+        });
+        if (verdict === 'new') stored++;
+        else if (verdict === 'dupe') dupes++;
+        if (verdict !== 'short') bytes += Buffer.byteLength(c.text);
+      }
+      const day = iso().slice(0, 10);
+      db.prepare(
+        `INSERT INTO memory_ingest (node, day, chunks, dupes, bytes) VALUES (?,?,?,?,?)
+         ON CONFLICT(node, day) DO UPDATE SET chunks = chunks + excluded.chunks,
+           dupes = dupes + excluded.dupes, bytes = bytes + excluded.bytes`
+      ).run(owner, day, stored, dupes, bytes);
+      if (node) touch(node.id);
+      logAudit(node ? 'node' : 'import', owner, 'memory', null, 'ok', { stored, dupes, chunks: chunks.length });
+      return [200, { ok: true, stored, dupes, total_chunks: ingest.count() }];
+    },
+
+    // Что уже лежит в общей памяти по узлам: видно отставание бэкфилла, а не «всё хорошо».
+    'GET /api/federation/memory/ingest': (req) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const rows = db.prepare('SELECT node, day, chunks, dupes, bytes FROM memory_ingest ORDER BY day DESC, node LIMIT 200').all();
+      return [200, { ok: true, ingest: rows }];
+    },
+
+    // Манифест автоматизации узлу: контентный адрес всего набора (docs/FEDERATION.md §9).
+    'GET /fed/v1/automation/manifest': (req, url) => {
+      const node = nodeByToken(req);
+      if (!node) return [401, { ok: false, error: 'unknown-node' }];
+      const manifest = buildAutomationManifest();
+      const since = url.searchParams.get('since');
+      if (since && since === manifest.sha) return [304, { ok: true, sha: manifest.sha }];
+      touch(node.id);
+      return [200, { ok: true, ...manifest }];
+    },
+
+    // Один файл манифеста: только то, что есть в манифесте, и только по относительному пути.
+    'GET /fed/v1/automation/file': (req, url) => {
+      const node = nodeByToken(req);
+      if (!node) return [401, { ok: false, error: 'unknown-node' }];
+      const rel = String(url.searchParams.get('path') || '');
+      const found = buildAutomationManifest().files.find((f) => f.path === rel);
+      if (!found) return [404, { ok: false, error: 'not-in-manifest' }];
+      const home = process.env.DSH_HOME || '/srv/apps/dsh/dsh-home';
+      const base = rel.startsWith('skills/') ? join(home, 'skills') : '/srv/apps/dsh/workspaces/pc_admin/scripts';
+      const fileName = rel.startsWith('skills/') ? rel.slice('skills/'.length) : rel.replace(/^checks\//, '');
+      const full = join(base, fileName);
+      if (!existsSync(full)) return [404, { ok: false, error: 'file-gone' }];
+      const buf = readFileSync(full);
+      if (sha256(buf) !== found.sha256) return [409, { ok: false, error: 'file-changed' }];
+      return [200, buf.toString('base64'), 'application/octet-stream', 'base64'];
+    },
+
+    // Отчёт узла: что у него реально стоит и совпадает ли с манифестом.
+    'POST /fed/v1/automation/report': async (req) => {
+      const node = nodeByToken(req);
+      if (!node) return [401, { ok: false, error: 'unknown-node' }];
+      const body = await readJson(req);
+      const state = body.applied_sha ? (body.drift?.length ? 'drift' : 'in-sync') : 'failed';
+      db.prepare(
+        `INSERT INTO node_automation (node, applied_sha, dsh_version, state, drift, last_error, applied_at)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(node) DO UPDATE SET applied_sha = excluded.applied_sha, dsh_version = excluded.dsh_version,
+           state = excluded.state, drift = excluded.drift, last_error = excluded.last_error, applied_at = excluded.applied_at`
+      ).run(node.id, body.applied_sha || null, body.dsh_version || null, state,
+        JSON.stringify(body.drift || []), body.error || null, iso());
+      touch(node.id);
+      logAudit('node', node.id, 'automation', null, state, { applied_sha: body.applied_sha ?? null });
+      return [200, { ok: true, state }];
+    },
+
+    // Запустить раскатку автоматизации на узле (P2d). Узел применит манифест у себя.
+    'POST /api/federation/automation/apply': async (req) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const body = await readJson(req);
+      if (!body.node) return [400, { ok: false, error: 'node required' }];
+      const cmd = enqueue(body.node, 'automation.apply', {}, 600);
+      logAudit('viewer', body.node, 'automation.apply', null, 'queued', { commandId: cmd.commandId });
+      return [200, { ok: true, ...cmd }];
+    },
+
+    'GET /api/federation/automation': (req) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const manifest = buildAutomationManifest();
+      const nodes = db.prepare('SELECT * FROM node_automation').all();
+      return [200, {
+        ok: true,
+        manifest: { sha: manifest.sha, counts: manifest.counts, bytes: manifest.files.reduce((a, f) => a + f.bytes, 0) },
+        nodes: nodes.map((n) => ({ ...n, drift: n.drift ? JSON.parse(n.drift) : [] }))
+      }];
+    },
+
     // Ответ узла на команду. Повтор с тем же commandId — не ошибка и не второе исполнение.
     'POST /fed/v1/reply': async (req) => {
       const node = nodeByToken(req);
@@ -725,6 +917,7 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
         snapshots: one('SELECT count(*) c FROM snapshots').c || 0,
         commands: db.prepare('SELECT state, count(*) c FROM commands GROUP BY state').all(),
         usage: one('SELECT count(*) c, sum(in_tokens) i, sum(out_tokens) o, sum(cache_read) r FROM usage'),
+        memory_ingest: db.prepare('SELECT node, day, chunks, dupes FROM memory_ingest ORDER BY day DESC LIMIT 5').all(),
         by_model: db.prepare('SELECT model, count(*) c, sum(in_tokens) i, sum(out_tokens) o FROM usage GROUP BY model ORDER BY c DESC LIMIT 20').all(),
         checked_at: iso()
       }];
@@ -740,6 +933,11 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
     if (!handler) return json(res, 404, { ok: false, error: 'not-found' });
     try {
       const out = await handler(req, url);
+      if (out[3] === 'base64') {
+        const buf = Buffer.from(out[1], 'base64');
+        res.writeHead(out[0], { 'content-type': out[2], 'content-length': buf.length });
+        return res.end(buf);
+      }
       if (out[2]) sendText(res, out[0], out[2], out[1]);
       else json(res, out[0], out[1]);
     } catch (e) {
