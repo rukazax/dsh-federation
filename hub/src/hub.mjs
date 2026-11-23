@@ -384,6 +384,19 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
     db.prepare(`UPDATE commands SET state = 'expired' WHERE state = 'queued' AND expires_at IS NOT NULL AND expires_at < ?`)
       .run(iso()).changes;
 
+  // Снапшот устарел или его нет → просим узел. Гейт по времени, чтобы обновление страницы
+  // не превращалось в поток команд.
+  const snapshotAsked = new Map();
+  const askSnapshot = (nodeId, sessionId, staleMs = 20_000) => {
+    const key = `${nodeId}|${sessionId}`;
+    const now = Date.now();
+    const snap = db.prepare('SELECT at FROM snapshots WHERE session_id = ? AND node = ?').get(String(sessionId), nodeId);
+    const fresh = snap && now - Date.parse(snap.at) < staleMs;
+    if (fresh || now - (snapshotAsked.get(key) || 0) < 10_000) return null;
+    snapshotAsked.set(key, now);
+    return enqueue(nodeId, 'snapshot', { sessionId: String(sessionId) }, 120);
+  };
+
   const saveSnapshot = (nodeId, sessionId, messages, upToSeq) => {
     db.prepare(
       `INSERT INTO snapshots (session_id, node, up_to_seq, messages, at) VALUES (?,?,?,?,?)
@@ -439,7 +452,15 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
   };
 
   const routes = {
-    'GET /healthz': () => ({ ok: true, proto: 1, nodes: db.prepare('SELECT count(*) c FROM nodes').get().c }),
+    'GET /healthz': () => {
+      const one = (sql) => db.prepare(sql).get()?.c || 0;
+      return [200, {
+        ok: true, proto: 1, version: '1.0.0',
+        nodes: one('SELECT count(*) c FROM nodes'),
+        sessions: one('SELECT count(*) c FROM sessions'),
+        commands: one('SELECT count(*) c FROM commands')
+      }];
+    },
 
     'POST /fed/v1/pair': async (req) => {
       const body = await readJson(req);
@@ -616,11 +637,13 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
         : db.prepare('SELECT * FROM sessions WHERE id = ? ORDER BY updated_at DESC').get(id);
       if (!s) return [404, { ok: false, error: 'no-such-session' }];
       const snap = db.prepare('SELECT up_to_seq, messages, at FROM snapshots WHERE session_id = ? AND node = ?').get(id, s.node);
+      const asked = askSnapshot(s.node, id);
       return [200, {
         ok: true,
         session: s,
         snapshot_at: snap?.at ?? null,
         up_to_seq: snap?.up_to_seq ?? null,
+        refreshing: Boolean(asked),
         messages: snap ? JSON.parse(snap.messages) : []
       }];
     },
@@ -633,9 +656,33 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       }
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(body.node);
       if (!node) return [404, { ok: false, error: 'no-such-node' }];
-      const cmd = enqueue(node.id, 'prompt', { sessionId: body.sessionId, text: String(body.text) });
+      const payload = { sessionId: body.sessionId, text: String(body.text) };
+      // модель выбирает зритель хаба; узел не подменяет её сам (docs/FEDERATION.md §7)
+      if (body.model?.provider && body.model?.model) payload.model = { provider: String(body.model.provider), model: String(body.model.model) };
+      const cmd = enqueue(node.id, 'prompt', payload);
       logAudit('viewer', node.id, 'prompt', body.sessionId, 'queued', { commandId: cmd.commandId, chars: String(body.text).length });
       return [200, { ok: true, ...cmd }];
+    },
+
+    'POST /api/federation/create': async (req) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const body = await readJson(req);
+      if (!body.node) return [400, { ok: false, error: 'node required' }];
+      const cmd = enqueue(body.node, 'create', { cwd: body.cwd ? String(body.cwd) : null }, 120);
+      logAudit('viewer', body.node, 'create', null, 'queued', { commandId: cmd.commandId });
+      return [200, { ok: true, ...cmd }];
+    },
+
+    'GET /api/federation/command': (req, url) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const id = url.searchParams.get('id');
+      if (!id) return [400, { ok: false, error: 'id required' }];
+      const row = db.prepare('SELECT * FROM commands WHERE command_id = ?').get(id);
+      if (!row) return [404, { ok: false, error: 'no-such-command' }];
+      return [200, {
+        ok: true, commandId: row.command_id, kind: row.kind, state: row.state,
+        result: row.result ? JSON.parse(row.result) : null, created_at: row.created_at, expires_at: row.expires_at
+      }];
     },
 
     'POST /api/federation/cancel': async (req) => {
@@ -710,8 +757,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   };
   const port = Number(arg('port', 18990));
   const dbPath = arg('db', new URL('../federation.sqlite', import.meta.url).pathname);
-  const code = arg('code', '');
-  const hubToken = arg('hub-token', '');
+  const code = arg('code', process.env.DSH_HUB_PAIR_CODE || '');
+  const host = arg('host', process.env.DSH_HUB_HOST || '127.0.0.1');
+  const hubToken = arg('hub-token', process.env.DSH_HUB_TOKEN || '');
   const vaultPath = arg('vault', process.env.DSH_OBSIDIAN_VAULT || '');
   const svgOut = arg('overview-svg', '');
   const jsonOut = arg('overview-json', '');
@@ -728,7 +776,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(0);
   }
   const hub = createHub({ dbPath, pairCode: code, hubToken, vaultPath });
-  hub.server.listen(port, '127.0.0.1', () => {
-    console.log(`dsh_hub listening http://127.0.0.1:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
+  hub.server.listen(port, host, () => {
+    console.log(`dsh_hub listening http://${host}:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
   });
 }
