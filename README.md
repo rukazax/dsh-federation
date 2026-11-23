@@ -203,7 +203,7 @@ flowchart LR
 
 ```bash
 cd hub
-npm test                                   # 9/9 pass
+npm test                                   # 16/16 pass
 node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite \
   --vault /srv/apps/dsh/obsidian/vault
 ```
@@ -260,17 +260,23 @@ one shared RAG and two phones — each item below carries a number and a way to 
 
 | Piece | Result | Evidence |
 | --- | --- | --- |
-| **Hub v1** | `dsh-federation` service, SQLite, idempotent `commandId` queue, SSE stream with a cursor, snapshots, `usage`, audit, dashboard at `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
+| **Hub v1** | `dsh-federation` service, SQLite, idempotent `commandId` queue, SSE stream with a cursor, snapshots, `usage`, audit, dashboard at `/` | `npm test` **16/16** (11 scenarios + 5 gates), `GET /healthz` → `{"ok":true,"proto":1}` |
 | **Node** | `@local/dsh-federation-node` plugin on a Debian PC: `hello`, `index`, a session created **from the hub**, a `prompt` executed **on the node** | tests **2/2**; `turn/end` in the node's journal, `reply{accepted}` plus a chat snapshot in the hub |
 | **Memory** | 374 journals from a Windows PC merged into the **same** `ctxdb.sqlite` | 48,168 chunks sent → **21,469 new** (14 projects), 29,099 duplicates dropped by id; a phrase from a Windows session ranks its session first |
 | **Automation (P2d)** | the hub profile manifest: **856 skills + 3 check scripts**, one `sha` for the set, files served one by one, applied by `automation.apply` | 859 files on the node, matching `sha`, state `in-sync`; a deleted skill came back on the next `apply` |
-| **Phones** | Redmi 23122PCD1G and HONOR FCP-N49 reach the hub **over LAN** (`192.168.88.35:18990`), no `adb reverse` | both show node `debian17`; the Redmi lists its 2 sessions and reads the conversation (4 messages) |
+| **Phone as hands (P2c)** | app 0.4: device service, accessibility service, Shizuku, `sandbox/assist/full`, tool policies, confirmation, stop switch, audit; 10 `phone_*` tools for a node | from the PC through the hub: 720×1600 screenshot, tap by text opened `Settings$WifiSettingsActivity`, `phone_shell` via Shizuku → `uid=2000`, `FCP-N49` |
+| **Model gateway (P3a)** | node holds no key: hub `baseURL`, allowlist enforced before upstream, `403` + audit, per-node `usage` | `npm test` **16/16** (gates included); a live model answer in a hub-created session; `llm/stats` → 17 811/468 tokens |
+| **Phones** | Redmi (LAN `192.168.88.35:18990`) and HONOR (currently `adb reverse`, its VPN captures the app UID) | both show node `debian17`; sessions and conversation open on both |
 
-**Honest caveat:** on 24 Nov the automation moved to DeepSeek — z.ai was dropped from the subagent and
-failover pools (the Z.AI weekly quota had run out), so the chain is now `deepseek-account/deepseek-flash` →
-`openai-codex/gpt-6-luna` → `deepseek-v4-pro`. Transport, queue and execution are verified, yet the node still
-has no model answer: the turn is accepted and completes. The structural next step is a model proxy on the hub
-(P3a), after which neither a node nor a phone needs a key of its own.
+**Then and now.** In the morning a node got no model answer: the turn was accepted and the provider replied
+`429` (Z.AI weekly quota spent). Now the node calls the **hub** (`/llm/v1/messages`); the hub enforces the
+allowlist and forwards to DeepSeek with its own account token, so the node carries no key at all. Verified live:
+a session created from the hub, the prompt executed on the node, the answer delivered, `usage` recorded per node.
+
+**Honestly open:** approvals relay (confirm an agent turn from the UI), session visibility matrix, 24 h / 14 day
+usage aggregates, a second node and the canary `federation-gate`. The Redmi has no Shizuku (HyperOS blocks
+`adb install`), so it stays in `assist`; the HONOR's VPN captures the app UID, hence `adb reverse` until
+`192.168.88.35` is added to its split tunnel.
 
 ### Memory and dashboard
 
