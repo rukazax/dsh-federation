@@ -1,11 +1,11 @@
 {
-  "name": "@local/dsh-hub-node",
+  "name": "@local/dsh-federation-node",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Узел федерации dsh_hub в профиле DSH: спаривание, index, поток команд, исполнение у себя",
+  "description": "Узел федерации dsh-federation в профиле DSH: спаривание, index, поток команд, исполнение у себя",
   "main": "index.js",
-  "bin": { "dsh-hub-node-pair": "bin/pair.mjs" },
+  "bin": { "dsh-federation-node-pair": "bin/pair.mjs" },
   "scripts": {
     "test": "node --test test/node.test.mjs"
   }

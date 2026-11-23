@@ -1,4 +1,4 @@
-// dsh_hub — узел федерации в профиле DSH.
+// dsh-federation — узел федерации в профиле DSH.
 //
 // Что делает: спаривается с хабом (файл ~/.dsh/federation/node.json, его пишет bin/pair.mjs),
 // отдаёт хабу список своих сессий (index), слушает поток команд (SSE) и исполняет их **у себя**:
@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
-export const name = 'dsh-hub-node';
+export const name = 'dsh-federation-node';
 export const inject = ['sessionController'];
 export const Config = undefined;
 
@@ -559,5 +559,5 @@ export function apply(ctx) {
 
   void start();
   void registerPhoneTools().catch((e) => trace(`инструменты телефона: ${e.message}`));
-  ctx.logger?.info?.(`[dsh-hub-node] узел ${pair.name || os.hostname()} → ${hub}`);
+  ctx.logger?.info?.(`[dsh-federation-node] узел ${pair.name || os.hostname()} → ${hub}`);
 }

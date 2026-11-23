@@ -1,4 +1,4 @@
-# dsh_hub — Android-клиент федерации
+# DSH Federation — Android-клиент федерации
 
 Нативное приложение для телефона: узлы федерации, сессии узла, переписка сессии,
 отправка промпта, «Новая сессия» и «Стоп». Русский интерфейс, тёмная тема,
@@ -26,7 +26,7 @@ HTTP — `HttpURLConnection`, JSON — `org.json`, токен — `SharedPrefere
 
 Все запросы идут с заголовком `authorization: Bearer <hub-token>`.
 Токен и адрес хаба не в коде: их вводят в диалоге «Токен» и они лежат в
-`SharedPreferences` (`dsh_hub` / `token`, `base`).
+`SharedPreferences` (`DSH Federation` / `token`, `base`).
 
 Раскладка выбирается по `LocalConfiguration.screenWidthDp`: `< 600 dp` — одна колонка
 с навигацией «назад», `>= 600 dp` — слева узлы (сверху) и сессии (снизу), справа

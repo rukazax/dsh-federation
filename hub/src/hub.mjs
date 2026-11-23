@@ -1,4 +1,4 @@
-// dsh_hub — хаб федерации, v0 (срез P0/P2): спаривание узлов, hello, приём index, выдача списков.
+// dsh-federation — хаб федерации (срез P0/P2): спаривание узлов, hello, приём index, выдача списков.
 // Стоит отдельным процессом на время разработки; в DSH монтируется как плагин позже.
 // Запуск: node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite --vault /srv/apps/dsh/obsidian/vault
 // Обзор базы: --overview-svg out.svg | --overview-json out.json (пишет и выходит, без сервера)
@@ -318,7 +318,7 @@ export function overviewSvg(ov, { width = 960, rowStep = 45 } = {}) {
 function dashboardHtml() {
   return `<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>dsh_hub · федерация</title>
+<title>DSH Federation · федерация</title>
 <style>
  :root{--bg:#0b1220;--card:#121a2e;--line:#2b3a5c;--fg:#eaf0ff;--dim:#8ea0c8;--acc:#4de2c5}
  *{box-sizing:border-box} body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
@@ -339,7 +339,7 @@ function dashboardHtml() {
  footer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)} footer textarea{flex:1;min-height:42px;resize:vertical}
  .pill{border:1px solid var(--line);border-radius:999px;padding:2px 8px;font:11px ui-monospace,monospace;color:var(--dim)}
 </style></head><body>
-<header><b>dsh_hub</b><span id="state">токен хаба →</span>
+<header><b>DSH Federation</b><span id="state">токен хаба →</span>
  <input id="tok" placeholder="hub-token" style="width:230px">
  <button onclick="saveTok()">войти</button><button onclick="reloadAll()">обновить</button>
  <span class="pill" id="stats"></span></header>
@@ -1245,6 +1245,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     credentialsPaths: process.env.DSH_CREDENTIALS_FILE ? [process.env.DSH_CREDENTIALS_FILE] : []
   });
   hub.server.listen(port, host, () => {
-    console.log(`dsh_hub listening http://${host}:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
+    console.log(`dsh-federation listening http://${host}:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
   });
 }

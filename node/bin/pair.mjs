@@ -50,4 +50,4 @@ if (!res.ok || !body.ok) {
 fs.mkdirSync(DIR, { recursive: true });
 fs.writeFileSync(FILE, JSON.stringify({ hub, nodeId: body.nodeId, token: body.token, name, paired_at: new Date().toISOString() }, null, 1), { mode: 0o600 });
 console.log(`спарено: nodeId=${body.nodeId} hub=${hub} файл=${FILE}`);
-console.log('дальше: перечитать плагин узла (plugin_manager set_bundle @local/dsh-hub-node false→true) или перезапустить DSH');
+console.log('дальше: перечитать плагин узла (plugin_manager set_bundle @local/dsh-federation-node false→true) или перезапустить DSH');

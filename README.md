@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/banner.svg" alt="dsh_hub — федерация DeepSeek Harness" width="100%"></p>
+<p align="center"><img src="assets/banner.svg" alt="DSH Federation — федерация DeepSeek Harness" width="100%"></p>
 
-<h1 align="center">dsh_hub</h1>
+<h1 align="center">DSH Federation</h1>
 
 <p align="center"><b>Одно окно на все твои DeepSeek Harness: хаб, узлы и телефон.</b></p>
 
@@ -34,7 +34,7 @@
 Хочется одного: видеть их из одного окна, отправлять промпты в чужую сессию, держать ключи LLM в одном
 месте и не терять работу, когда устройство выключено.
 
-`dsh_hub` — это **федерация**: один экземпляр DSH становится хабом, остальные — узлами. Узлы живут своей
+DSH Federation — это **федерация**: один экземпляр DSH становится хабом, остальные — узлами. Узлы живут своей
 жизнью (свои сессии, своя работа, свой офлайн), хаб видит всё, собирает общую память, хранит единственные
 ключи моделей и даёт одно окно управления — на ПК и в Android-приложении.
 
@@ -61,12 +61,12 @@
 ```mermaid
 flowchart LR
   subgraph HUB["Хаб — один из твоих DSH"]
-    H["плагин dsh_hub<br/>role=hub · HTTP :18990 · SSE"]
+    H["плагин DSH Federation<br/>role=hub · HTTP :18990 · SSE"]
     DB[("federation.sqlite<br/>nodes · sessions · usage · commands · audit")]
   end
   N1["Узел: настольный ПК<br/>role=node"] -->|исходящий HTTPS<br/>Bearer node-token| H
   N2["Узел: ноутбук<br/>role=node"] -->|исходящий HTTPS| H
-  M["Телефон: приложение dsh_hub<br/>пульт + служба устройства"] -->|SSE + команды| H
+  M["Телефон: приложение DSH Federation<br/>пульт + служба устройства"] -->|SSE + команды| H
   H -.->|"манифест: скиллы, плагины,<br/>зависимости, патчи"| N1
   H --- DB
 ```
@@ -87,8 +87,8 @@ flowchart LR
 
 | Что | Итог | Чем доказано |
 | --- | --- | --- |
-| **Хаб v1** | служба `dsh-hub`, SQLite, очередь команд с идемпотентным `commandId`, SSE-поток узлу с курсором, снапшоты, `usage`, аудит, дашборд на `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
-| **Узел** | плагин `@local/dsh-hub-node` на Debian-ПК: `hello`, `index`, сессия создана **из хаба**, `prompt` исполнен **на узле** | тесты **2/2**; в журнале узла `turn/end`, в хабе — `reply{accepted}` и снапшот переписки |
+| **Хаб v1** | служба `dsh-federation`, SQLite, очередь команд с идемпотентным `commandId`, SSE-поток узлу с курсором, снапшоты, `usage`, аудит, дашборд на `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
+| **Узел** | плагин `@local/dsh-federation-node` на Debian-ПК: `hello`, `index`, сессия создана **из хаба**, `prompt` исполнен **на узле** | тесты **2/2**; в журнале узла `turn/end`, в хабе — `reply{accepted}` и снапшот переписки |
 | **Память** | 374 журнала Windows-ПК влиты в **тот же** `ctxdb.sqlite` | 48 168 чанков отправлено → **21 469 новых** (14 проектов), 29 099 дублей отсеклось по id; поиск по фразе из Windows-сессии отдаёт её первой |
 | **Автоматизация (P2d)** | манифест профиля хаба: **856 скиллов + 3 чек-скрипта**, `sha` на весь набор, выдача файлов по одному, применение командой `automation.apply` | на узле 859 файлов, `sha` совпал, состояние `in-sync`; удалённый скилл вернулся следующим `apply` |
 | **Телефоны** | Redmi 23122PCD1G и HONOR FCP-N49 видят хаб **по локальной сети** (`192.168.88.35:18990`), без `adb reverse` | на обоих `ru.dsh.hub` показывает узел `debian17`; на Redmi открыты его 2 сессии и переписка (4 сообщения) |
@@ -251,8 +251,8 @@ one shared RAG and two phones — each item below carries a number and a way to 
 
 | Piece | Result | Evidence |
 | --- | --- | --- |
-| **Hub v1** | `dsh-hub` service, SQLite, idempotent `commandId` queue, SSE stream with a cursor, snapshots, `usage`, audit, dashboard at `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
-| **Node** | `@local/dsh-hub-node` plugin on a Debian PC: `hello`, `index`, a session created **from the hub**, a `prompt` executed **on the node** | tests **2/2**; `turn/end` in the node's journal, `reply{accepted}` plus a chat snapshot in the hub |
+| **Hub v1** | `dsh-federation` service, SQLite, idempotent `commandId` queue, SSE stream with a cursor, snapshots, `usage`, audit, dashboard at `/` | `npm test` **9/9**, `GET /healthz` → `{"ok":true,"proto":1}` |
+| **Node** | `@local/dsh-federation-node` plugin on a Debian PC: `hello`, `index`, a session created **from the hub**, a `prompt` executed **on the node** | tests **2/2**; `turn/end` in the node's journal, `reply{accepted}` plus a chat snapshot in the hub |
 | **Memory** | 374 journals from a Windows PC merged into the **same** `ctxdb.sqlite` | 48,168 chunks sent → **21,469 new** (14 projects), 29,099 duplicates dropped by id; a phrase from a Windows session ranks its session first |
 | **Automation (P2d)** | the hub profile manifest: **856 skills + 3 check scripts**, one `sha` for the set, files served one by one, applied by `automation.apply` | 859 files on the node, matching `sha`, state `in-sync`; a deleted skill came back on the next `apply` |
 | **Phones** | Redmi 23122PCD1G and HONOR FCP-N49 reach the hub **over LAN** (`192.168.88.35:18990`), no `adb reverse` | both show node `debian17`; the Redmi lists its 2 sessions and reads the conversation (4 messages) |

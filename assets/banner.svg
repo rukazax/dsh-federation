@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" role="img" aria-label="dsh_hub — федерация DeepSeek Harness">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" role="img" aria-label="DSH Federation — федерация DeepSeek Harness">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#7aa2ff"/>
@@ -25,7 +25,7 @@
     <circle cx="1130" cy="160" r="8"/>
     <circle cx="900" cy="160" r="6"/>
   </g>
-  <text x="72" y="132" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="72" font-weight="800" fill="url(#g)" letter-spacing="-1">dsh_hub</text>
+  <text x="72" y="132" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="72" font-weight="800" fill="url(#g)" letter-spacing="-1">DSH Federation</text>
   <text x="74" y="182" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="26" fill="#c9d4ee">Хаб, узлы и телефон: одна федерация твоих DSH</text>
   <text x="74" y="222" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" fill="#7f8fb3">исполнение — у хозяина · ключи — на хабе · ядро DSH не трогаем</text>
   <text x="74" y="286" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" fill="#4b5a7d">DeepSeek Harness · federation · Android · foldable</text>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Иконка dsh_hub: тёмный фон, градиентная сеть из трёх узлов.
+"""Иконка DSH Federation: тёмный фон, градиентная сеть из трёх узлов.
 
 Рисует legacy (48..192 px) и adaptive foreground (108dp: 108..432 px).
 Проверка: bbox глифа внутри safe zone 66/108, черновик в docs/.

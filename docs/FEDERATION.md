@@ -63,41 +63,58 @@ sequenceDiagram
 
 ## 4. Телефон как узел
 
-Телефон — узел с расширенными `capabilities`. В `hello` он сразу говорит, что умеет:
+Телефон — узел с расширенными возможностями. У него нет профиля DSH, поэтому канал свой, но правила те
+же: агент не получает прав устройства, он присылает запрос, а приложение проверяет режим и политику.
+
+**Регистрация.** Приложение зовёт `POST /fed/v1/device/hello` с токеном хаба один раз, получает
+`deviceId` и собственный `deviceToken` (на хабе только `sha256`), дальше ходит им. В `hello` оно сразу
+говорит, что умеет:
 
 ```json
-{
-  "proto": 1,
-  "node": { "name": "phone-fcp", "version": "0.1.0", "os": "android-17" },
-  "capabilities": {
-    "modes": ["sandbox", "assist"],
-    "tools": ["phone_ui_tree", "phone_screenshot", "phone_tap", "phone_type", "phone_open_app"],
-    "full": false
-  }
-}
+{ "proto": 1,
+  "device": { "name": "HONOR FCP-N49", "model": "FCP-N49", "android": "17", "sdk": 37 },
+  "mode": "assist",
+  "capabilities": { "modes": ["sandbox", "assist", "full"],
+                    "tools": ["phone_ui_tree", "phone_screenshot", "phone_tap", "phone_swipe",
+                              "phone_type", "phone_open_app", "phone_shell"],
+                    "full": true },
+  "policies": { "shell": "ask", "launch": "auto" } }
 ```
 
-Команда того же вида, что `prompt`, только `kind: "device.tool"`:
-
-```json
-{ "commandId": "c-7f1a", "kind": "device.tool",
-  "payload": { "tool": "phone_tap", "args": { "x": 540, "y": 1200 } } }
-```
+**Канал.** `GET /fed/v1/device/commands?cursor=N` держит long-poll до 25 с, `POST /fed/v1/device/reply`
+возвращает результат. Запрос от агента: `POST /api/federation/phone` с `{ "tool": "phone_tap",
+"args": { "x": 540, "y": 1200 }, "waitMs": 15000 }` — хаб ждёт ответа и отдаёт его тем же вызовом.
+Имена `phone_*` переводятся в виды команд (`tap`, `screenshot`, …) на хабе, агенту привычны инструменты.
 
 | Инструмент | Минимальный режим | Что возвращает |
 | --- | --- | --- |
-| `phone_ui_tree` | assist | элементы: role, text, bounds, clickable |
-| `phone_screenshot` | assist | PNG (base64), размеры экрана |
-| `phone_tap` / `phone_swipe` | assist | `ok` или `unsupported-surface` |
+| `phone_ui_tree` | assist | элементы: text, desc, id, bounds, clickable, focus |
+| `phone_screenshot` | assist | JPEG (base64), ширина и высота |
+| `phone_tap` / `phone_swipe` | assist | `ok`, куда попали, что в фокусе после |
 | `phone_type` | assist | `ok`, фактический текст поля |
 | `phone_open_app` | assist | `ok`, пакет и активность |
-| `phone_notifications` | assist | список: пакет, заголовок, текст |
-| `phone_clipboard_get/set` | full | текст |
-| `phone_shell` | full | stdout/stderr, код возврата, лимит вывода |
+| `phone_key` | assist | `ok`: back, home, recents, notifications, enter |
+| `phone_shell` | full | stdout/stderr, код возврата; через Shizuku |
+| `phone_stop` | любой | `stopped: true` — до «Пуск» в приложении |
 
 Ошибки — отдельными кодами, без подмены: `no-permission` (режим не включает инструмент),
-`needs-confirmation` (политика `ask`), `unsupported-surface` (защищённый экран), `full-unavailable`
-(Shizuku не запущен), `timeout`. Агент должен видеть причину, а не «не получилось».
+`needs-confirmation` (политика `ask`, пользователь не подтвердил), `unsupported-surface` (защищённый
+экран или API ниже 30), `full-unavailable` (Shizuku не запущен), `timeout`, `not-found`.
+Агент видит причину, а не «не получилось».
+
+**Режимы.** `sandbox` — по умолчанию: только свои данные, экран чужой, любой инструмент отвечает
+`no-permission`. `assist` — служба доступности включена: дерево, скриншот, жесты, ввод, запуск
+приложений. `full` — плюс shell через Shizuku; без запущенного Shizuku честно деградирует в `assist`
+(`capabilities.full=false`), а не притворяется.
+
+**Политика инструмента:** `auto` (можно сразу), `ask` (по умолчанию для `shell` и опасных действий —
+на телефоне появляется диалог с таймаутом 60 с), `deny` (сразу отказ). Стоп-кран гасит исполнение до
+явного «Пуск», постоянное уведомление показывает режим и кнопку «Стоп». Всё, что приложение сделало по
+запросу агента, видно в его журнале и строкой `phone.<вид>` в аудите хаба.
+
+Отложено осознанно: `phone_notifications` и `phone_clipboard_get/set` из первой редакции таблицы — их
+нет ни в приложении, ни в хабе; вернуть, когда понадобится читать уведомления или буфер (политика `ask`
+и режим `full` для них уже готовы).
 
 ## 5. Модель данных (хаб)
 
@@ -173,8 +190,12 @@ flowchart LR
 - **Видимость.** Скрытая сессия не отдаётся списком, поиском памяти и прямым id (`404`), а не «не
   показывается в UI».
 - **Аудит.** Каждая команда и каждое подтверждение — строка в `audit`: кто, что, где, чем кончилось.
-- **Прокси моделей — единственные ворота.** Allowlist узла, бюджет, RPM/TPM проверяются до апстрима;
-  отказ `403` с отдельным кодом, без тихой подмены модели. `fallback` резолвится на загрузке конфига.
+- **Прокси моделей — единственные ворота.** Allowlist моделей проверяется до апстрима; отказ `403` с
+  отдельным кодом, без тихой подмены модели. Сделано (`hub/src/llm-gateway.mjs`): узел монтирует штатный
+  `@deepseek-ai/dsh-llm-deepseek-api-key` с `baseURL: http://<хаб>:18990/llm` и `apiKeyEnv: DSH_FED_LLM_TOKEN`,
+  токен шлюза выдаёт хаб (`POST /api/federation/node/llm-token`) и гасит прежний при перевыдаче. Наружу
+  уходит токен аккаунта хаба, на узле ключа провайдера нет. Не сделано: бюджет и RPM/TPM (лимиты держит
+  провайдер), `fallback` (он живёт в `llm-failover` на хабе).
 - **Счёт.** `user` в запросе к провайдеру = `sha256(token)` узла, чтобы провайдерский счёт сходился с нашим.
 - **Данные не уезжают.** Личная федерация — только свои устройства; трансграничная передача не
   предусмотрена. Если когда-нибудь появится внешний арендатор — это отдельный контур и отдельные правила.

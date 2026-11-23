@@ -84,7 +84,7 @@ test('спаривание, hello, index и выдача списков', async 
 });
 
 test('данные узла переживают перезапуск хаба', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-hub-'));
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-federation-'));
   const dbPath = join(dir, 'fed.sqlite');
   try {
     const first = createHub({ dbPath, pairCode: 'CODE' });

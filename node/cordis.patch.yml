@@ -1,5 +1,5 @@
 # Узел федерации: монтируется в профиль DSH как обычный плагин.
 # Спаривание — до включения: node bin/pair.mjs --hub http://<хаб>:18990 --code <код>
 - insert:
-    - id: dsh-hub-node
-      name: '@local/dsh-hub-node'
+    - id: dsh-federation-node
+      name: '@local/dsh-federation-node'

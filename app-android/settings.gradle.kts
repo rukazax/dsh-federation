@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "dsh_hub"
+rootProject.name = "DSH Federation"
 include(":app")
