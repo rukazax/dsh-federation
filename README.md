@@ -104,10 +104,11 @@ $ cd node && npm test
 `page()` требует `throughSeq`, сообщение лежит то в `data.message`, то прямо в `data`) — узел пробует формы
 по очереди и запоминает **вид** запроса, а не адрес, иначе снапшот одной сессии уезжает в другую.
 
-**Честная оговорка:** ход на узле доходит до модели только при живом лимите провайдера. На стенде он
-упёрся в недельный лимит Z.AI (429 `Weekly/Monthly Limit Exhausted` до 2026-11-25) — транспорт, очередь и
-исполнение проверены, ответ модели ждёт восстановления квоты. Структурное лечение — прокси моделей на хабе
-(P3a), чтобы у узла и телефона вообще не было своих ключей.
+**Честная оговорка:** 24.11 автоматика переведена на DeepSeek: z.ai убран из пулов сабагентов и failover
+(недельная квота Z.AI была исчерпана), в цепочке теперь `deepseek-account/deepseek-flash` →
+`openai-codex/gpt-6-luna` → `deepseek-v4-pro`. Транспорт, очередь и исполнение проверены, но ответа модели
+на узле пока нет: ход принимается и завершается, а следующая структурная ступень — прокси моделей на хабе
+(P3a), после которого узлу и телефону ключи не нужны вовсе.
 
 ## План
 
@@ -159,21 +160,35 @@ flowchart LR
 
 ## Телефон и раскладные экраны
 
-Приложение рассчитано на три раскладки и не ломается при сгибе:
+Приложение рассчитано на две раскладки, и переключаются они по ширине окна, а не по типу устройства:
 
 | Устройство | Ширина окна | Раскладка |
 | --- | --- | --- |
-| Телефон (сложен) | ~353 dp | одна колонка: список → сессия → чат по шагам |
-| Раскладной (раскрыт) | ~718 dp | две колонки: слева узлы и сессии, справа переписка |
-| Планшет / веб | ≥ 840 dp | три зоны: узлы, сессии, чат |
+| Телефон | ~353–430 dp | одна колонка: узлы → сессии → переписка, шагами с анимацией |
+| Раскладной / планшет | ≥ 600 dp | две колонки: слева узлы и сессии, справа переписка |
 
-Сгиб определяется через `WindowInfoTracker` + `FoldingFeature`: `HALF_OPENED` с вертикальной складкой —
-контент раскладывается по половинам и не заезжает на петлю; горизонтальная складка — верх/низ.
-Состояние экрана и черновик промпта переживают сгиб и разгиб (`rememberSaveable`, `ViewModel`).
+Сгиб отдельно не отслеживается: раскладка выбирается по `screenWidthDp`. Этого хватает и на HONOR FCP-N49
+(внутренний 2156×2344, ~718 dp — две колонки; внешний 1060×2376, ~353 dp — одна). Состояние экрана и
+черновик промпта переживают поворот и сворачивание (`rememberSaveable` + `ViewModel`).
 
-Проверено на живом устройстве: **HONOR FCP-N49**, Android 17 (API 37), два дисплея — внутренний
-2156×2344 (480 dpi, ~718 dp) и внешний 1060×2376 (~353 dp). Как устроены режимы `sandbox` / `assist` / `full`
-и как это принимается на телефоне — в [docs/APP.md](docs/APP.md).
+### Дизайн 0.2
+
+Тёмная тема без внешних библиотек: Compose Material3, `material-icons-core` и своя палитра
+(`#070A11` фон, `#5B8CFF`/`#A06BFF` акцент, мятный статус «онлайн»). В шапке — градиент и логотип-сеть,
+узлы — карточки с аватаром-инициалом и живой точкой связи, сессии — карточки с полосой статуса,
+переписка — пузыри с градиентом у пользователя. Иконка приложения — та же сеть из трёх узлов;
+растр собирается скриптом [`app-android/tools/make_icon.py`](app-android/tools/make_icon.py)
+(legacy 48–192 px + adaptive foreground 108dp).
+
+| Узлы | Сессии | Переписка |
+| --- | --- | --- |
+| <img src="assets/phone-23122PCD1G-nodes.png" width="240"> | <img src="assets/phone-23122PCD1G-sessions.png" width="240"> | <img src="assets/phone-23122PCD1G-chat.png" width="240"> |
+
+Две колонки на раскладном HONOR FCP-N49:
+
+<img src="assets/phone-FCP-N49-panes.png" width="640">
+
+Как устроены режимы `sandbox` / `assist` / `full` и как это принимается на телефоне — в [docs/APP.md](docs/APP.md).
 
 ## Быстрый старт
 
@@ -242,10 +257,11 @@ one shared RAG and two phones — each item below carries a number and a way to 
 | **Automation (P2d)** | the hub profile manifest: **856 skills + 3 check scripts**, one `sha` for the set, files served one by one, applied by `automation.apply` | 859 files on the node, matching `sha`, state `in-sync`; a deleted skill came back on the next `apply` |
 | **Phones** | Redmi 23122PCD1G and HONOR FCP-N49 reach the hub **over LAN** (`192.168.88.35:18990`), no `adb reverse` | both show node `debian17`; the Redmi lists its 2 sessions and reads the conversation (4 messages) |
 
-**Honest caveat:** a node turn only reaches the model while the provider quota is alive. On this stand it hit
-Z.AI's weekly limit (429 `Weekly/Monthly Limit Exhausted` until 2026-11-25) — transport, queue and execution
-are verified, the model answer waits for the quota. The structural fix is a model proxy on the hub (P3a), so
-neither a node nor a phone needs a key of its own.
+**Honest caveat:** on 24 Nov the automation moved to DeepSeek — z.ai was dropped from the subagent and
+failover pools (the Z.AI weekly quota had run out), so the chain is now `deepseek-account/deepseek-flash` →
+`openai-codex/gpt-6-luna` → `deepseek-v4-pro`. Transport, queue and execution are verified, yet the node still
+has no model answer: the turn is accepted and completes. The structural next step is a model proxy on the hub
+(P3a), after which neither a node nor a phone needs a key of its own.
 
 ### Memory and dashboard
 

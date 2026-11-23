@@ -5,10 +5,12 @@
 
     <application
         android:allowBackup="false"
-        android:label="dsh_hub"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/Theme.DshHub">
         <activity
             android:name=".MainActivity"
             android:exported="true"
