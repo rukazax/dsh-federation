@@ -202,3 +202,120 @@ test('векторный обзор: имена экранируются, пус
   assert.match(missing, /нет доступа к vault/);
   assert.ok(missing.length > 200);
 });
+
+// ── P1/P3: команды узлу, снапшоты, usage, аудит ──────────────────────────────
+
+/** Одно SSE-событие с data:-строкой; таймаут — чтобы тест падал, а не висел. */
+async function readEvent(reader, ms = 3000) {
+  let buf = '';
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const { value, done } = await reader.read();
+    if (done) return null;
+    buf += Buffer.from(value).toString('utf8');
+    const line = buf.split('\n').find((l) => l.startsWith('data: '));
+    if (line) return JSON.parse(line.slice(6));
+  }
+  throw new Error('SSE event timeout');
+}
+
+test('команда уходит узлу по SSE, ответ идемпотентен, аудит пишется', async () => {
+  const hub = createHub({ pairCode: 'CODE', hubToken: 'HUB' });
+  const { base, call } = await started(hub);
+  const paired = await call('POST', '/fed/v1/pair', { code: 'CODE', node: { name: 'n1' } });
+  const { token, nodeId } = paired.body;
+  const ac = new AbortController();
+  try {
+    const stream = await fetch(`${base}/fed/v1/stream`, { headers: { authorization: `Bearer ${token}` }, signal: ac.signal });
+    assert.equal(stream.status, 200);
+    const reader = stream.body.getReader();
+
+    const p = await call('POST', '/api/federation/prompt', { node: nodeId, sessionId: 's1', text: 'привет' }, 'HUB');
+    assert.equal(p.status, 200);
+    assert.match(p.body.commandId, /^[0-9a-f]{12}$/);
+
+    const ev = await readEvent(reader);
+    assert.equal(ev.kind, 'prompt');
+    assert.equal(ev.commandId, p.body.commandId);
+    assert.equal(ev.payload.text, 'привет');
+
+    const rep = await call('POST', '/fed/v1/reply', { commandId: ev.commandId, ok: true, result: { accepted: true } }, token);
+    assert.equal(rep.status, 200);
+    assert.equal(rep.body.state, 'done');
+
+    const dup = await call('POST', '/fed/v1/reply', { commandId: ev.commandId, ok: true }, token);
+    assert.equal(dup.body.duplicate, true);
+
+    const audit = await call('GET', '/api/federation/audit', null, 'HUB');
+    assert.ok(audit.body.audit.some((a) => a.action === 'prompt' && a.result === 'queued'));
+
+    const stats = await call('GET', '/api/federation/stats', null, 'HUB');
+    assert.equal(stats.body.commands.find((c) => c.state === 'done').c, 1);
+  } finally {
+    ac.abort();
+    hub.close();
+  }
+});
+
+test('офлайн-команда ждёт и приходит по курсору при переподключении', async () => {
+  const hub = createHub({ pairCode: 'CODE', hubToken: 'HUB' });
+  const { base, call } = await started(hub);
+  try {
+    const paired = await call('POST', '/fed/v1/pair', { code: 'CODE', node: { name: 'n2' } });
+    const { token, nodeId } = paired.body;
+    // узел не на связи — команда лежит в очереди
+    await call('POST', '/api/federation/prompt', { node: nodeId, sessionId: 's9', text: 'офлайн' }, 'HUB');
+
+    const polling = await call('GET', '/fed/v1/commands?since=0', null, token);
+    assert.equal(polling.body.commands.length, 1);
+    assert.equal(polling.body.commands[0].payload.text, 'офлайн');
+
+    const ac = new AbortController();
+    const stream = await fetch(`${base}/fed/v1/stream?cursor=0`, { headers: { authorization: `Bearer ${token}` }, signal: ac.signal });
+    const ev = await readEvent(stream.body.getReader());
+    ac.abort();
+    assert.equal(ev.payload.text, 'офлайн');
+  } finally {
+    hub.close();
+  }
+});
+
+test('снапшот и usage: переписка читается, токены не дублируются', async () => {
+  const hub = createHub({ pairCode: 'CODE', hubToken: 'HUB' });
+  const { call } = await started(hub);
+  try {
+    const paired = await call('POST', '/fed/v1/pair', { code: 'CODE', node: { name: 'n3' } });
+    const { token, nodeId } = paired.body;
+    await call('POST', '/fed/v1/index', { sessions: [{ id: 's1', title: 'книга', status: 'idle' }] }, token);
+
+    const snap = await call('POST', '/fed/v1/snapshot', {
+      sessionId: 's1',
+      upToSeq: 42,
+      messages: [
+        { role: 'user', text: 'сколько заметок?' },
+        { role: 'assistant', text: 'девять тысяч' }
+      ]
+    }, token);
+    assert.equal(snap.body.messages, 2);
+
+    const detail = await call('GET', `/api/federation/session?id=s1&node=${nodeId}`, null, 'HUB');
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.session.title, 'книга');
+    assert.equal(detail.body.up_to_seq, 42);
+    assert.equal(detail.body.messages[1].text, 'девять тысяч');
+
+    const u1 = await call('POST', '/fed/v1/usage', { calls: [
+      { request_id: 'r1', provider: 'zai', model: 'glm-5.3-flash', in_tokens: 100, out_tokens: 20, cost_usd: '0.0012' },
+      { request_id: 'r1', provider: 'zai', model: 'glm-5.3-flash', in_tokens: 100, out_tokens: 20 }
+    ] }, token);
+    assert.equal(u1.body.stored, 1);
+    assert.equal(u1.body.skipped, 1);
+
+    const stats = await call('GET', '/api/federation/stats', null, 'HUB');
+    assert.equal(stats.body.usage.c, 1);
+    assert.equal(stats.body.usage.i, 100);
+    assert.equal(stats.body.by_model[0].model, 'glm-5.3-flash');
+  } finally {
+    hub.close();
+  }
+});
