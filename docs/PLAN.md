@@ -17,6 +17,7 @@
 | **P2. Хаб + UI** | SQLite, снапшоты, приём, SSE наружу, панель «список + сессия», панель «Обзор базы Obsidian» | ~1150 строк | 5–6 дней | переписка в UI совпадает с `session.markdown` узла; скрытая сессия отсутствует в списке и отдаёт `404` по прямому id; «Обзор базы» отдаёт заметки по разделам и последний `analysis-*.md` (JSON и `format=svg`), а без vault — `available:false`, не `500` |
 | **P2b. Клиент Android** | приложение: узлы, сессии, переписка, промпт, approvals; раскладки под сгиб | ~1200 строк | 5–6 дней | на живом телефоне: список узлов, открытие сессии, отправка промпта, подтверждение и отказ; сгиб/разгиб не теряет экран и черновик |
 | **P2c. Телефон как узел** | служба устройства: `sandbox` / `assist` / `full`, инструменты `phone_*`, политики, аудит, стоп | ~2000 строк | 3–4 недели | скриншот и тап по элементу воспроизводятся с ПК; в `sandbox` чужой экран не читается; `full` без Shizuku честно деградирует в `assist`; опасный инструмент требует подтверждения |
+| **P2d. Автоматизация узлов** | манифест профиля хаба (скиллы, `@local/*`, патчи, MCP, пресеты, чек-скрипты), `automation.apply` по SSE, дрейф, откат, канарейка | ~450 строк | 2–3 дня | чистая машина + `pair` + один `apply` даёт те же скиллы и тот же `sha`, что на хабе, `apply.sh --check` и `check-*.mjs` зелёные; удалённый скилл восстанавливается как `drift`→`in-sync`; несовпадение версии DSH даёт `incompatible` без поломки узла |
 | **P3. Исполнение** | prompt/cancel/rename, очередь, TTL, approvals-релей, аудит | ~350 строк | 3–4 дня | промпт из UI хаба исполняется на узле (`state=running` там), ответ только в логе узла |
 | **P3a. Права и модели** | матрица видимости, allowlist моделей, прокси «единственные ворота», отзыв доступа | ~650 строк | 3–4 дня | смена режима узла применяется ≤5 с; запрос запрещённой модели → `403` + аудит; `fallback` решается на загрузке конфига |
 | **P3b. Статистика** | `usage`, агрегаты 24 ч / 14 дней, карточки, граф памяти | ~350 строк | 2 дня | сумма `usage` по узлу = числу вызовов в логе прокси; расход сходится с провайдерским счётом при `user = hash(token)` |
@@ -34,6 +35,8 @@ flowchart LR
   H --> A["P2b Клиент Android"]
   H --> Ph["P2c Телефон как узел"]
   A --> Ph
+  N --> Au["P2d Автоматизация узлов"]
+  Au --> F
   H --> E["P3 Исполнение"]
   E --> R["P3a Права и модели"]
   R --> S["P3b Статистика"]
@@ -41,7 +44,8 @@ flowchart LR
 ```
 
 Правило: телефон не начинаем, пока хаб не отдаёт список сессий; правку модели не начинаем, пока врата не
-считают `usage`.
+считают `usage`; автоматизацию не раскатываем на все узлы, пока канареечный узел не прошёл `apply.sh --check`
+и `check-*.mjs`.
 
 ## 4. Риски
 
@@ -55,6 +59,9 @@ flowchart LR
 7. **Стоимость бэкфилла в граф** — дешёвая модель, кэш, лимит на день.
 8. **Телефон как удалённый доступ к личному устройству** — токен, подтверждения, аудит, отзыв, песочница
    по умолчанию.
+9. **Раскатка автоматизации — общий рубильник**: один плохой патч или скилл ложит поведение всех узлов
+   разом. Поэтому канарейка, staging с атомарной заменой и откатом, гейт по версии DSH — а не «разошлём
+   всем и посмотрим».
 
 ## 5. Чего сознательно не делаем
 
@@ -64,6 +71,10 @@ flowchart LR
 - WebSocket: SSE с курсором закрывает потребность.
 - mTLS/JWT на каждый запрос: TLS + bearer + Origin достаточно для домашней федерации.
 - Синхронизация логов с хаба обратно на узел: хаб — читатель.
+- Свой набор скиллов и зависимостей на узле «как привык»: расхождение — это тихая разница в поведении
+  агента, лечим манифестом, а не вкусом устройства.
+- Пересылка секретов на узлы: ключи LLM и токены остаются на хабе.
+- Раскатка автоматизации на телефон: профиля DSH там нет, обновление — APK.
 - Слияние с другими ядрами в один репозиторий.
 
 ## English
@@ -74,3 +85,11 @@ the proxy request log, and the phone gate proves that `sandbox` mode cannot read
 mode honestly degrades to `assist` without Shizuku. Order matters: the phone starts after the hub lists
 sessions, model policy after the gates count usage. Volumes are agent-estimates with tests on live devices,
 not man-months.
+
+Stage P2d makes automation a hub concern rather than a per-device hobby: skills, plugins, dependencies and
+kernel patches are assembled once in the hub profile and rolled out to nodes as a content-addressed manifest
+applied through the existing command channel. Its gate is behavioural: a bare machine plus pairing plus one
+apply must end up with the same skill set and the same `sha` as the hub, a deleted skill must come back as
+`drift`→`in-sync`, and a node on a different DSH version must be refused as `incompatible` while staying
+usable on its previous set. Canary first, atomic swap with rollback, no secrets in the manifest, and
+`sessions/` is never part of it.

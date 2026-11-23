@@ -23,6 +23,8 @@
 | узел → хаб | `POST /fed/v1/snapshot` | `{sessionId, upToSeq, messages[]}` (gzip) |
 | узел → хаб | `POST /fed/v1/usage` | пачка вызовов: модель, токены, статус, ms, `request_id` |
 | узел → хаб | `POST /fed/v1/memory` | пачка чанков: kind, project, session, hash, text |
+| узел → хаб | `POST /fed/v1/automation/report` | `{applied_sha, dsh_version, plugins[], skills[], patches[], errors[]}` — что реально стоит |
+| узел → хаб | `GET /fed/v1/automation/manifest[?since=<sha>]` | `{sha, dsh_version, files[{kind,path,mode,sha256}], plugins[]}`; тот же `sha` — `304` |
 | узел → хаб | `GET /fed/v1/stream?cursor=N` | SSE: `command`, `node-refresh`; `Last-Event-ID` |
 | узел → хаб | `POST /fed/v1/reply` | `{commandId, ok, result}` — идемпотентно |
 | UI → хаб | `GET /api/federation/nodes\|sessions\|session/:id\|stats\|audit` | JSON |
@@ -108,10 +110,13 @@ memory_ingest(node, day, chunks, bytes, dupes)
 commands(id, node, kind, payload_json, created_at, expires_at, state, result_json)
 pairing(code_hash, node_name, created_at, expires_at, approved, used_at)
 audit(id, ts, viewer, node, action, session, result, detail_json)
+automation_manifest(id, created_at, dsh_version, sha, manifest_json)
+node_automation(node, applied_sha, dsh_version, state, drift_json, last_error, applied_at)
 ```
 
 Правила: деньги — `TEXT` с Decimal, ни одного `float`; `cost_usd = null`, если цены модели нет;
-`state` команды ∈ `queued|delivered|done|failed|expired`; `mode` узла ∈ `full|readonly|quarantine`.
+`state` команды ∈ `queued|delivered|done|failed|expired`; `mode` узла ∈ `full|readonly|quarantine`;
+`state` автоматизации ∈ `in-sync|drift|applying|failed|incompatible`.
 
 ## 6. Память: один общий RAG
 
@@ -179,6 +184,55 @@ flowchart LR
 - Контрактный чек сверяет методы и события `sessionController` — то, что реально используется, а не «сервисы
   живы».
 
+## 9. Автоматизация: один профиль хаба на все узлы
+
+Скиллы, плагины, зависимости и патчи не заводятся на каждом устройстве руками — иначе у двух узлов агент
+ведёт себя по-разному, а «почему тут не работает» ищется перебором. Источник правды один: профиль хаба —
+его скиллы, плагины `@local/*`, набор патчей `settings/patches/apply.sh`, MCP-серверы, `cordis.patch.yml`,
+пресеты агентов и скрипты `scripts/check-*.mjs`.
+
+**Транспорт не новый.** Манифест — обычный HTTP-ответ, применение — команда `kind: "automation.apply"` по
+тому же SSE. Идемпотентность `commandId`, очередь, TTL, approvals и аудит уже есть, второй канал не нужен.
+
+```mermaid
+sequenceDiagram
+  participant H as Хаб (профиль)
+  participant N as Узел
+  N->>H: hello {applied_sha, dsh_version}
+  H->>H: собрать манифест, sha256 по файлам и плагинам
+  H-->>N: command automation.apply {sha, files[]}
+  N->>N: staging → проверка версии → атомарная замена
+  N->>N: apply.sh --check, check-*.mjs
+  N-->>H: reply {ok, applied_sha}
+  H->>H: node_automation.state = in-sync | drift | failed
+```
+
+| Принцип | Что это значит на практике |
+| --- | --- |
+| **Один источник правды** | новый скилл, зависимость или патч появляются на хабе один раз; узлы догоняют сами, второго скилл-стора нет |
+| **Контентный адрес** | `sha256` на каждый файл и на весь набор; `applied_sha` в `hello` показывает дрейф без опроса узла |
+| **Дрейф лечится** | скилл удалили, патч откатился — следующий `apply` возвращает, в аудите строка `drift`, а не «показалось» |
+| **Версия — гейт** | манифест несёт `dsh_version`; несовпадение с `engines.dsh` → `incompatible`, узел остаётся на последнем рабочем наборе |
+| **Нет полу-состояния** | сначала staging рядом, проверки, потом атомарная замена; сбой на любом шаге — откат на прежний набор |
+| **Канарейка** | сначала один узел: `apply.sh --check` и `check-*.mjs` зелёные, потом остальные — как в P0-«-1» |
+| **Секреты не едут** | ключи LLM, токены ботов и пароли в манифест не попадают; узлу они не нужны — модели идут через прокси хаба |
+| **Чужие логи не трогаем** | меняется только слой профиля: `skills/`, `node_modules/@local/*`, `settings/patches/`, `cordis.patch.yml`; `sessions/` в манифест не входит никогда |
+
+Единицы раскатки: `plugin` (`@local/*` из `workspaces/pc_admin/plugins/`, не из npm — имена там заняты),
+`skill` (файл из `~/.dsh/skills/**`), `patch` (applier плюс строка в `apply.sh`), `mcp` (сервер в конфиге),
+`preset` (пресет агента), `script` (чек-скрипт). Зависимости — `package.json` профиля и один проверенный
+`pnpm-lock`: версия одна на всех, иначе «у меня работает» превращается в отдельную реальность.
+
+Телефон в раскатку не входит: профиля DSH у него нет, его обновление — APK, а не манифест.
+
+Приёмка:
+
+- чистая машина + `pair` + один `apply` → скиллы и `sha` набора совпадают с хабом, `apply.sh --check` чист,
+  `check-*.mjs` зелёные;
+- удалить на узле скилл → в `report` `drift`, следующий `apply` вернул файл, `state` снова `in-sync`;
+- узел с версией DSH ниже хаба → `incompatible` с причиной в аудите, узел продолжает работать на прежнем;
+- обрыв сети посреди `apply` → узел на прежнем наборе, `failed` с ошибкой, повтор идемпотентен.
+
 ## English
 
 Three roles — hub, node and viewer — with one hard rule: a turn runs only on the node that owns the session.
@@ -202,3 +256,16 @@ opens, and a missing vault answers `available:false` instead of a 500. The same 
 graphics via `?format=svg` (`image/svg+xml`, ~3.5 KB for 9,649 notes) or to a file with `--overview-svg`, so
 the panel, GitHub and Telegram share one lossless picture. Refreshing the overview is an explicit button
 that runs `memory_analyze` and re-reads the note.
+
+Automation is not assembled per device either. The hub's profile is the single source of truth — its skills,
+`@local/*` plugins, the kernel patch set, MCP servers, agent presets and check scripts — and every node is
+brought to it. A node reports `applied_sha` and `dsh_version` in `hello`; the hub answers with a
+content-addressed manifest (`sha256` per file and for the whole set) and the node applies it as an
+`automation.apply` command over the existing SSE channel, so idempotency, queueing, TTL and audit come for
+free. Drift — a deleted skill, a reverted patch — shows up in `applied_sha` and is healed by the next apply
+with a `drift` audit row. The manifest carries `dsh_version`: a mismatch with `engines.dsh` is refused as
+`incompatible` and the node keeps its last good set instead of breaking. Nothing is half-applied: staging
+first, checks, then an atomic swap with rollback. Secrets never travel — LLM keys, bot tokens and passwords
+are absent from the manifest because nodes borrow models through the hub proxy — and the manifest never
+touches `sessions/`, only the profile layer. Rollout is canary-first (`apply.sh --check` plus `check-*.mjs` on
+one node), and the phone is out of scope: it has no DSH profile and updates as an APK.

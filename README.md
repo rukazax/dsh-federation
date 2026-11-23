@@ -52,6 +52,9 @@
    трёх режимов: `sandbox` (по умолчанию), `assist` (служба доступности), `full` (Shizuku, права shell).
 5. **Опасное — по подтверждению.** Инструменты уровня `phone_shell` по умолчанию спрашивают разрешение,
    каждое решение пишется в аудит, «стоп» гасит команды.
+6. **Автоматизация — одна на всех.** Скиллы, плагины, зависимости и патчи собираются в профиле хаба и
+   раскатываются на узлы контентно-адресным манифестом: узел не заводит свой набор, а догоняет хаб и
+   показывает дрейф.
 
 ## Как устроено
 
@@ -64,6 +67,7 @@ flowchart LR
   N1["Узел: настольный ПК<br/>role=node"] -->|исходящий HTTPS<br/>Bearer node-token| H
   N2["Узел: ноутбук<br/>role=node"] -->|исходящий HTTPS| H
   M["Телефон: приложение dsh_hub<br/>пульт + служба устройства"] -->|SSE + команды| H
+  H -.->|"манифест: скиллы, плагины,<br/>зависимости, патчи"| N1
   H --- DB
 ```
 
@@ -101,6 +105,7 @@ hub-токена закрыты, данные узла переживают пе
 | P2 Хаб + UI | SQLite, снапшоты, приём, SSE наружу, панель | 5–6 дней |
 | P2b Клиент Android | приложение: узлы, сессии, переписка, промпт, approvals | 5–6 дней |
 | P2c Телефон как узел | служба устройства: sandbox / assist / full, `phone_*`, аудит | 3–4 недели |
+| P2d Автоматизация узлов | манифест профиля хаба: скиллы, `@local/*`, патчи, MCP, дрейф, откат | 2–3 дня |
 | P3 Исполнение | prompt/cancel/rename, очередь, TTL, approvals-релей | 3–4 дня |
 | P3a Права и модели | видимость, allowlist, прокси «единственные ворота», отзыв | 3–4 дня |
 | P3b Статистика | `usage`, агрегаты, карточки, граф памяти | 2 дня |
@@ -206,12 +211,17 @@ control window — on the desktop and in an Android app.
    (Shizuku, shell rights) — the device decides, the agent only asks.
 5. **Dangerous tools ask.** `phone_shell` requires confirmation by default, every decision goes to the audit
    log, and a stop switch halts commands.
+6. **Automation is shared, not per device.** Skills, plugins, dependencies and kernel patches live in the hub
+   profile and roll out as a content-addressed manifest; a node catches up and reports drift instead of
+   growing its own set.
 
 ### Status
 
 Hub v0 works and is covered by tests: pairing by code, `hello`, `index` ingestion, node/session listings in
 SQLite with no dependencies (`node:sqlite`, Node 24). `npm test` → 2/2 pass. Node plugin, Android app and the
-device service are on the roadmap (see [docs/PLAN.md](docs/PLAN.md)).
+device service are on the roadmap (see [docs/PLAN.md](docs/PLAN.md)), along with P2d: rolling the hub's
+skills, plugins, dependencies and patches onto every node as one manifest instead of setting each device up by
+hand.
 
 ### Memory and dashboard
 
