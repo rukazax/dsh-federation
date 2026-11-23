@@ -1,9 +1,11 @@
 // dsh_hub — хаб федерации, v0 (срез P0/P2): спаривание узлов, hello, приём index, выдача списков.
 // Стоит отдельным процессом на время разработки; в DSH монтируется как плагин позже.
-// Запуск: node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite
+// Запуск: node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite --vault /srv/apps/dsh/obsidian/vault
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCHEMA = `
@@ -69,7 +71,71 @@ function readJson(req, limit = 4 << 20) {
 
 const bearer = (req) => (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '';
 
-export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '' } = {}) {
+const ANALYSIS_DIR = 'Аналитика';
+
+function walkMd(dir, depth = 0, acc = []) {
+  if (depth > 3) return acc;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) walkMd(full, depth + 1, acc);
+    else if (e.name.endsWith('.md')) acc.push(full);
+  }
+  return acc;
+}
+
+// Обзор базы Obsidian: заметки по разделам + последний обзор `memory_analyze` (Аналитика/analysis-*.md).
+// Считается на месте, без LLM: панель открывается бесплатно, а новый обзор — отдельным действием.
+export function vaultOverview(vaultPath, excerptChars = 1600) {
+  const notes = { total: 0, bySection: {} };
+  if (!vaultPath || !existsSync(vaultPath)) {
+    return { available: false, reason: 'vault-missing', vault: vaultPath || null, notes, analysis: null };
+  }
+  const files = walkMd(vaultPath);
+  const prefix = vaultPath.endsWith('/') ? vaultPath : vaultPath + '/';
+  let best = null;
+  for (const f of files) {
+    const rel = f.slice(prefix.length);
+    const section = rel.includes('/') ? rel.split('/')[0] : '(root)';
+    notes.bySection[section] = (notes.bySection[section] || 0) + 1;
+    if (rel.startsWith(ANALYSIS_DIR + '/')) {
+      let mtimeMs = 0;
+      try {
+        mtimeMs = statSync(f).mtimeMs;
+      } catch {
+        continue;
+      }
+      // один и тот же mtime у пары файлов — не редкость (созданы одним ходом): берём старший по имени,
+      // потому что дата в имени analysis-YYYY-MM-DD и есть хронология обзоров.
+      if (!best || mtimeMs > best.mtimeMs || (mtimeMs === best.mtimeMs && rel > best.rel)) best = { path: f, rel, mtimeMs };
+    }
+  }
+  notes.total = files.length;
+  let analysis = null;
+  if (best) {
+    let md = '';
+    try {
+      md = readFileSync(best.path, 'utf8');
+    } catch {
+      md = '';
+    }
+    analysis = {
+      name: best.rel.slice(ANALYSIS_DIR.length + 1),
+      updated_at: new Date(best.mtimeMs).toISOString(),
+      chars: md.length,
+      excerpt: md.slice(0, excerptChars),
+      md
+    };
+  }
+  return { available: true, vault: vaultPath, notes, analysis, checked_at: iso() };
+}
+
+export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', vaultPath = process.env.DSH_OBSIDIAN_VAULT || '' } = {}) {
   const db = new DatabaseSync(dbPath);
   db.exec(SCHEMA);
 
@@ -147,6 +213,12 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '' } 
       return [200, { ok: true, nodes: rows.map((r) => ({ ...r, capabilities: JSON.parse(r.capabilities || '{}'), models_seen: JSON.parse(r.models_seen || '[]') })) }];
     },
 
+    'GET /api/federation/memory/overview': (req, url) => {
+      if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
+      const dir = url.searchParams.get('vault') || vaultPath;
+      return [200, { ok: true, ...vaultOverview(dir) }];
+    },
+
     'GET /api/federation/sessions': (req, url) => {
       if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
       const node = url.searchParams.get('node');
@@ -182,7 +254,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const dbPath = arg('db', new URL('../federation.sqlite', import.meta.url).pathname);
   const code = arg('code', '');
   const hubToken = arg('hub-token', '');
-  const hub = createHub({ dbPath, pairCode: code, hubToken });
+  const vaultPath = arg('vault', process.env.DSH_OBSIDIAN_VAULT || '');
+  const hub = createHub({ dbPath, pairCode: code, hubToken, vaultPath });
   hub.server.listen(port, '127.0.0.1', () => {
     console.log(`dsh_hub listening http://127.0.0.1:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
   });

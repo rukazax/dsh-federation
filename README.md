@@ -20,6 +20,7 @@
 | 🧭 [Принципы](#принципы) | Три правила, из которых выведено всё остальное |
 | 🏗️ [Как устроено](#как-устроено) | Хаб, узлы, телефон, протокол |
 | ✅ [Что уже работает](#что-уже-работает) | Хаб v0 и его проверки |
+| 🧠 [Память и дашборд](#память-и-дашборд) | Один общий RAG и обзор базы Obsidian на панели |
 | 🗺️ [План](#план) | Этапы, объём, приёмка |
 | 📱 [Телефон и раскладные экраны](#телефон-и-раскладные-экраны) | Песочница, assist, полный доступ; FCP-N49 |
 | ⚡ [Быстрый старт](#быстрый-старт) | Поднять хаб и прогнать тесты |
@@ -108,6 +109,32 @@ hub-токена закрыты, данные узла переживают пе
 MVP (P0–P2) — около полутора недель, полный объём с телефоном — 7–8 недель агентской работы.
 Этапы, критерии приёмки и риски — в [docs/PLAN.md](docs/PLAN.md).
 
+## Память и дашборд
+
+Память у федерации **одна на всех**: хаб уже держит `dsh-memory-hub` (ингест `session/event` всех чатов и
+воркспейсов, гибридный поиск, дедуп по `hash`) и LightRAG на `127.0.0.1:9621`. Узел присылает чанки в
+`POST /fed/v1/memory`, и они ложатся **в тот же индекс** с меткой `workspace`/`node` — вопрос задаётся один
+раз, а не трижды по числу устройств.
+
+Дашборд хаба показывает состояние базы не «на глаз», а конкретными числами и последним обзором. Панель
+«Обзор базы» берёт готовую заметку `Аналитика/analysis-YYYY-MM-DD.md`, которую пишет `memory_analyze`, и
+считает заметки по разделам — всё локально, без вызова модели. Новый анализ — по кнопке.
+
+![Обзор базы Obsidian: 9 649 заметок, 10 513 чанков, 495 сессий](assets/vault-overview.svg)
+
+```mermaid
+flowchart LR
+  D["Дашборд · «Обзор базы»"] -->|"GET /api/federation/memory/overview"| H["Хаб"]
+  H -->|"локально, без LLM"| V[("Obsidian vault")]
+  D -.->|"кнопка «Обновить обзор»"| A["memory_analyze"]
+  A -->|"analysis-DATE.md"| V
+```
+
+- Ответ панели: заметки по разделам, объём последнего обзора, `updated_at`, полный текст обзора.
+- Vault не смонтирован → `available:false`, `reason:"vault-missing"`; панель пишет «база недоступна», а не
+  пустой экран и не `500`.
+- Скрытая сессия в индекс не попадает, поэтому её нет и в обзоре — правило видимости одно на все пути.
+
 ## Телефон и раскладные экраны
 
 Приложение рассчитано на три раскладки и не ломается при сгибе:
@@ -174,6 +201,19 @@ control window — on the desktop and in an Android app.
 Hub v0 works and is covered by tests: pairing by code, `hello`, `index` ingestion, node/session listings in
 SQLite with no dependencies (`node:sqlite`, Node 24). `npm test` → 2/2 pass. Node plugin, Android app and the
 device service are on the roadmap (see [docs/PLAN.md](docs/PLAN.md)).
+
+### Memory and dashboard
+
+Memory is one shared RAG for the whole federation: the hub runs `dsh-memory-hub` (ingests `session/event`
+from every chat and workspace, hybrid recall, hash dedupe) plus LightRAG on `127.0.0.1:9621`. A node posts
+chunks to `POST /fed/v1/memory` and they land in the **same** index tagged with `workspace`/`node` — one
+question, one answer, not one per device.
+
+The dashboard shows the base as numbers, not vibes. The "Base overview" panel reads the latest
+`Аналитика/analysis-*.md` written by `memory_analyze`, counts notes per section locally (no LLM call on open),
+and offers an explicit refresh button. A missing vault answers `available:false` with `reason:"vault-missing"`
+instead of a blank screen or a 500. Hidden sessions are never ingested, so they are absent from the overview
+too — one visibility rule for every read path.
 
 ### Foldables
 

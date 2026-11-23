@@ -1,10 +1,10 @@
 // Проверка среза P0/P2: спаривание, hello, index, списки, отказ без токена, персистентность.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHub } from '../src/hub.mjs';
+import { createHub, vaultOverview } from '../src/hub.mjs';
 
 async function started(hub) {
   await new Promise((r) => hub.server.listen(0, '127.0.0.1', r));
@@ -97,5 +97,55 @@ test('данные узла переживают перезапуск хаба',
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('обзор базы Obsidian: счётчики по разделам и последний обзор «Аналитика»', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vault-'));
+  const vault = join(dir, 'vault');
+  try {
+    mkdirSync(join(vault, 'Facts'), { recursive: true });
+    mkdirSync(join(vault, 'Tasks'), { recursive: true });
+    mkdirSync(join(vault, 'Аналитика'), { recursive: true });
+    writeFileSync(join(vault, 'Memory Hub.md'), '# Memory Hub\n');
+    writeFileSync(join(vault, 'Facts', 'a.md'), '- факт\n');
+    writeFileSync(join(vault, 'Facts', 'b.md'), '- факт\n');
+    writeFileSync(join(vault, 'Tasks', 't.md'), '- [ ] задача\n');
+    writeFileSync(join(vault, 'Аналитика', 'analysis-2026-11-20.md'), 'старый обзор\n');
+    writeFileSync(join(vault, 'Аналитика', 'analysis-2026-11-23.md'), '# Обзор\n\n- цель: федерация\n');
+
+    const hub = createHub({ hubToken: 'HUB', vaultPath: vault });
+    const { call } = await started(hub);
+    try {
+      assert.equal((await call('GET', '/api/federation/memory/overview')).status, 401);
+
+      const res = await call('GET', '/api/federation/memory/overview', null, 'HUB');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.available, true);
+      assert.equal(res.body.notes.total, 6);
+      assert.equal(res.body.notes.bySection.Facts, 2);
+      assert.equal(res.body.notes.bySection['(root)'], 1);
+      assert.equal(res.body.analysis.name, 'analysis-2026-11-23.md');
+      assert.match(res.body.analysis.excerpt, /цель: федерация/);
+    } finally {
+      hub.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('пропавшая папка vault: available=false, а не 500', async () => {
+  const hub = createHub({ vaultPath: '/nonexistent/vault-for-test' });
+  const { call } = await started(hub);
+  try {
+    const res = await call('GET', '/api/federation/memory/overview');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.available, false);
+    assert.equal(res.body.reason, 'vault-missing');
+    assert.equal(res.body.notes.total, 0);
+    assert.equal(vaultOverview('').available, false);
+  } finally {
+    hub.close();
   }
 });

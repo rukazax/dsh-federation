@@ -26,6 +26,7 @@
 | узел → хаб | `GET /fed/v1/stream?cursor=N` | SSE: `command`, `node-refresh`; `Last-Event-ID` |
 | узел → хаб | `POST /fed/v1/reply` | `{commandId, ok, result}` — идемпотентно |
 | UI → хаб | `GET /api/federation/nodes|sessions|session/:id|stats|audit` | JSON |
+| UI → хаб | `GET /api/federation/memory/overview` | JSON: заметки по разделам + последний обзор `Аналитика/analysis-*.md` |
 | UI → хаб | `POST /api/federation/prompt|cancel|rename|perms` | JSON → `commandId` |
 | LLM узла → хаб | `POST /fed/v1/llm/stream` | стрим, `model` сверяется с allowlist узла |
 
@@ -130,6 +131,30 @@ LightRAG 1.5.7 на `127.0.0.1:9621`. Узел присылает чанки в 
   времени выгрузки.
 - **Бэкфилл безопасен:** повторная отправка идемпотентна по `hash`, старые сессии догоняются тем же роутом.
 
+### 6.1 Обзор базы на дашборде
+
+Панель «Обзор базы» в дашборде не запускает LLM: она читает готовый результат `memory_analyze`
+(заметку `Аналитика/analysis-YYYY-MM-DD.md`, которую хаб и так пишет в vault) и счётчики заметок.
+Новый обзор — отдельная кнопка: она дёргает `memory_analyze` и перечитывает заметку.
+
+```mermaid
+flowchart LR
+  D["Дашборд · панель «Обзор базы»"] -->|"GET /api/federation/memory/overview"| H["Хаб"]
+  H -->|"читать, без LLM"| V[("Obsidian vault<br/>Facts · Routines · Аналитика")]
+  D -.->|"кнопка «Обновить обзор»"| A["memory_analyze"]
+  A -->|"пишет analysis-DATE.md"| V
+  H -->|"счётчики: заметки по разделам,<br/>последний обзор, 7 938 знаков"| D
+```
+
+![Обзор базы Obsidian: 9 649 заметок, 10 513 чанков, 495 сессий](../assets/vault-overview.svg)
+
+- **Дёшево по умолчанию.** Панель открывается без вызова модели: 9 649 заметок пересчитываются локально
+  за миллисекунды, а анализ стоит токенов — поэтому он по кнопке, а не на каждый показ.
+- **Пропавший vault — не 500.** `/srv/apps/dsh/obsidian/vault` не смонтирован или переехал: ответ
+  `available:false, reason:"vault-missing"`, панель честно пишет «база недоступна» вместо пустого экрана.
+- **Один источник правды.** Панель показывает ровно тот обзор, который лежит в vault; расхождение с
+  `memory_analyze` возможно только по времени выгрузки, и оно видно как `updated_at`.
+
 ## 7. Безопасность
 
 - **Токены.** Узлу выдаётся случайный токен при спаривании; на хабе хранится только `sha256`. Отзыв —
@@ -168,4 +193,7 @@ Memory stays one shared RAG, not one per node: the hub already runs `dsh-memory-
 `127.0.0.1:9621`. A node posts chunks to `POST /fed/v1/memory` and the hub writes them into the **same**
 index, tagged with `workspace` and `node`, so a fact is found by one search instead of three. A hidden
 session is never ingested, so it cannot be found either; `memory_ingest` counts chunks/bytes/dupes per node
-per day to expose backfill lag, and Obsidian is a view of that index, not a second store.
+per day to expose backfill lag, and Obsidian is a view of that index, not a second store. The dashboard's "Base overview" panel calls `GET /api/federation/memory/overview`, which counts
+vault notes per section and returns the latest `Аналитика/analysis-*.md` verbatim: no LLM runs when the panel
+opens, and a missing vault answers `available:false` instead of a 500. Refreshing the overview is an explicit
+button that runs `memory_analyze` and re-reads the note.
