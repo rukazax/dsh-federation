@@ -69,8 +69,10 @@ export function toMessages(records) {
     else if (ev.type === 'tool/result') role = 'tool';
     if (!role) continue;
     // Инъекции рантайма (контекст каталога, время) — не переписка: в UI хаба им не место.
+    // В переписку идёт только то, что человек реально написал. Инъекции рантайма
+    // (runtime-context, time-context, skill-catalog) — служебные, их в UI хаба не место.
     const sourceKind = ev.data?.message?.source?.kind ?? ev.data?.source?.kind;
-    if (role === 'user' && (sourceKind === 'runtime-context' || sourceKind === 'time-context')) continue;
+    if (role === 'user' && sourceKind && sourceKind !== 'user') continue;
     // Форма события тоже разная по версиям: 0.2.2 кладёт сообщение в data.message,
     // 0.2.1 — прямо в data (content/role/id на верхнем уровне).
     const payload = ev.data?.message ?? ev.data ?? {};
@@ -148,10 +150,7 @@ export function apply(ctx) {
     return sessions.length;
   };
 
-  /**
-   * Чтение истории разными формами запроса: набор полей page() менялся между версиями DSH.
-   * Сначала пробуем ту форму, что уже сработала (state.pageShape), потом остальные.
-   */
+  /** Какие методы реально есть у sessionController этой версии DSH (диагностика в журнале). */
   const probeMethods = () => {
     const out = [];
     for (const k of ['page', 'events', 'state', 'wait', 'follow', 'projections', 'observeEvent', 'list', 'create', 'prompt', 'cancel', 'rename']) {
@@ -193,32 +192,41 @@ export function apply(ctx) {
    * 0.2.1 требует throughSeq (последний seq), новые версии берут его сами.
    * Пробуем по очереди и запоминаем удачную форму.
    */
+  /**
+   * Чтение истории: набор полей page() менялся между версиями DSH.
+   * 0.2.1 требует throughSeq (последний seq), новые версии берут его сами.
+   *
+   * Запоминаем только ВИД запроса, а не готовый объект: адрес и throughSeq считаются заново
+   * для каждой сессии. Иначе запомненный JSON тащит чужой sessionId — и снапшот одной сессии
+   * уезжает в другую (поймано на живой паре 23.11).
+   */
   const pageAny = async (sessionId) => {
     const address = { kind: 'session', sessionId };
     const seq = await lastSeq(sessionId);
-    const base = [
-      ...(seq !== null ? [{ address, throughSeq: seq, maxMessages: SNAPSHOT_MESSAGES }] : []),
-      { address, maxMessages: SNAPSHOT_MESSAGES },
-      { address, throughSeq: -1, maxMessages: SNAPSHOT_MESSAGES },
-      { address }
-    ];
-    const worked = state.pageShape;
-    const shapes = worked
-      ? [JSON.parse(worked), ...base.filter((x) => JSON.stringify(x) !== worked)]
-      : base;
+    const variants = {
+      'with-seq': () => (seq !== null ? { address, throughSeq: seq, maxMessages: SNAPSHOT_MESSAGES } : null),
+      plain: () => ({ address, maxMessages: SNAPSHOT_MESSAGES }),
+      'minus-one': () => ({ address, maxMessages: SNAPSHOT_MESSAGES, throughSeq: -1 }),
+      'address-only': () => ({ address })
+    };
+    const order = ['with-seq', 'plain', 'minus-one', 'address-only'];
+    const worked = state.pageShape && variants[state.pageShape] ? state.pageShape : null;
+    const names = worked ? [worked, ...order.filter((n) => n !== worked)] : order;
     let lastError = null;
-    for (const req of shapes) {
+    for (const name of names) {
+      const req = variants[name]();
+      if (!req) continue;
       try {
         const page = await sc().page(req, AbortSignal.timeout(30_000));
-        trace(`page форма ${JSON.stringify(req)} → records=${(page.records || []).length}`);
+        trace(`page ${name} ${sessionId} → records=${(page.records || []).length}`);
         if ((page.records || []).length > 0) {
-          state.pageShape = JSON.stringify(req);
+          state.pageShape = name;
           saveState();
         }
         return page;
       } catch (e) {
         lastError = e;
-        trace(`page форма ${JSON.stringify(req)} → отказ: ${e.message}`);
+        trace(`page ${name} ${sessionId} → отказ: ${e.message}`);
       }
     }
     throw lastError || new Error('page: ни одна форма запроса не подошла');

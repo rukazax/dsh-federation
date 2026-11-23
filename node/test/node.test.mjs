@@ -40,7 +40,7 @@ test('чистые части: текст сообщения, переписка
 
 test('узел отдаёт index, исполняет prompt у себя и присылает снапшот', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-node-'));
-  const seen = { hello: null, index: null, replies: [], snapshots: [], prompts: [] };
+  const seen = { hello: null, index: null, replies: [], snapshots: [], prompts: [], pageCalls: [] };
   let stream = null;
 
   const server = createServer(async (req, res) => {
@@ -89,14 +89,19 @@ test('узел отдаёт index, исполняет prompt у себя и пр
       list: async () => ({
         items: [{ sessionId: 's1', updatedAt: 1_700_000_000_000, running: false, blank: false, cwd: '/w', projections: { kind: 'cached', asOfSeq: 1, values: { title: 'моя книга' } } }]
       }),
-      page: async () => ({
-        cursor: 2,
-        hasMore: false,
-        records: [
-          { type: 'event', event: { type: 'user/message', seq: 1, time: 1_700_000_000_000, data: { message: { content: [{ type: 'text', text: 'привет' }] } } } },
-          { type: 'event', event: { type: 'assistant/message', seq: 2, time: 1_700_000_001_000, data: { message: { content: [{ type: 'text', text: 'ответ' }] } } } }
-        ]
-      }),
+      page: async (req) => {
+        const sid = req.address?.sessionId;
+        seen.pageCalls.push(sid);
+        const text = sid === 's2' ? 'вторая сессия' : 'привет';
+        return {
+          cursor: 2,
+          hasMore: false,
+          records: [
+            { type: 'event', event: { type: 'user/message', seq: 1, time: 1_700_000_000_000, data: { message: { content: [{ type: 'text', text }] } } } },
+            { type: 'event', event: { type: 'assistant/message', seq: 2, time: 1_700_000_001_000, data: { message: { content: [{ type: 'text', text: 'ответ' }] } } } }
+          ]
+        };
+      },
       prompt: async (req) => {
         seen.prompts.push(req);
         return { accepted: true };
@@ -124,6 +129,15 @@ test('узел отдаёт index, исполняет prompt у себя и пр
     assert.equal(seen.snapshots[0].sessionId, 's1');
     assert.equal(seen.snapshots[0].upToSeq, 2);
     assert.deepEqual(seen.snapshots[0].messages.map((m) => m.role), ['user', 'assistant']);
+
+    // Регресс 23.11: запомненная форма запроса тащила чужой sessionId — вторая сессия
+    // получала снапшот первой. Теперь адрес собирается заново для каждой сессии.
+    stream.write(`id: 2\ndata: ${JSON.stringify({ seq: 2, commandId: 'c2', kind: 'snapshot', payload: { sessionId: 's2' } })}\n\n`);
+    await waitFor(() => seen.snapshots.length >= 2, 6000, 'снапшот второй сессии');
+    const second = seen.snapshots[1];
+    assert.equal(second.sessionId, 's2');
+    assert.equal(second.messages[0].text, 'вторая сессия');
+    assert.ok(seen.pageCalls.includes('s2'), 'page должен спрашивать вторую сессию, а не первую');
   } finally {
     mod.stopActiveNode();
     stream?.end();
