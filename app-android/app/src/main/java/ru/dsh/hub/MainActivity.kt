@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -74,6 +76,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -105,20 +108,20 @@ private const val KEY_TOKEN = "token"
 
 // ---------- палитра ----------
 
-private val Bg = Color(0xFF070A11)
-private val BgSoft = Color(0xFF0C1120)
-private val Card = Color(0xFF121A2A)
-private val CardHi = Color(0xFF182234)
-private val Edge = Color(0xFF23304A)
-private val Ink = Color(0xFFECF2FD)
-private val InkDim = Color(0xFF93A3BC)
-private val Accent = Color(0xFF5B8CFF)
-private val Accent2 = Color(0xFFA06BFF)
-private val Mint = Color(0xFF3DDC97)
-private val Amber = Color(0xFFFFC93C)
-private val Rose = Color(0xFFFF6B7A)
+internal val Bg = Color(0xFF070A11)
+internal val BgSoft = Color(0xFF0C1120)
+internal val Card = Color(0xFF121A2A)
+internal val CardHi = Color(0xFF182234)
+internal val Edge = Color(0xFF23304A)
+internal val Ink = Color(0xFFECF2FD)
+internal val InkDim = Color(0xFF93A3BC)
+internal val Accent = Color(0xFF5B8CFF)
+internal val Accent2 = Color(0xFFA06BFF)
+internal val Mint = Color(0xFF3DDC97)
+internal val Amber = Color(0xFFFFC93C)
+internal val Rose = Color(0xFFFF6B7A)
 
-private val HubScheme = darkColorScheme(
+internal val HubScheme = darkColorScheme(
     primary = Accent,
     onPrimary = Color.White,
     primaryContainer = Color(0xFF1E2E4C),
@@ -382,11 +385,16 @@ class MainActivity : ComponentActivity() {
         // Удобные extras для установки/проверки: adb shell am start -e token <…>
         val extraToken = intent?.getStringExtra("token")
         val extraBase = intent?.getStringExtra("base") ?: intent?.getStringExtra("url")
+        // Явный «Пуск» службы устройства (та же кнопка в приложении, exported=false у службы).
+        val startDevice = intent?.getBooleanExtra("startDevice", false) == true ||
+            intent?.getStringExtra("device") == "start"
+        if (startDevice) DeviceService.startDevice(this)
+        val openAccess = intent?.getStringExtra("screen") == "access"
         setContent {
             MaterialTheme(colorScheme = HubScheme) {
                 val vm: HubVm = viewModel()
                 LaunchedEffect(Unit) { vm.seed(extraBase, extraToken) }
-                App(vm)
+                App(vm, startAccess = openAccess)
             }
         }
     }
@@ -403,8 +411,9 @@ private fun screenOf(vm: HubVm): Screen = when {
 }
 
 @Composable
-fun App(vm: HubVm) {
+fun App(vm: HubVm, startAccess: Boolean = false) {
     val wide = LocalConfiguration.current.screenWidthDp >= 600
+    var showAccess by rememberSaveable { mutableStateOf(startAccess) }
     var showSettings by rememberSaveable { mutableStateOf(vm.token.isBlank()) }
     // Диалог открывается сам только пока токена нет; после подстановки (или ввода) он закрывается.
     var autoOpened by rememberSaveable { mutableStateOf(vm.token.isBlank()) }
@@ -414,6 +423,8 @@ fun App(vm: HubVm) {
             autoOpened = false
         }
     }
+
+    BackHandler(enabled = showAccess) { showAccess = false }
 
     Scaffold(
         containerColor = Bg,
@@ -425,13 +436,15 @@ fun App(vm: HubVm) {
                 vm = vm,
                 onRefresh = { vm.loadNodes() },
                 onSettings = { showSettings = true },
+                onAccess = { showAccess = true },
             )
             BusyLine(vm.busy)
             AnimatedVisibility(visible = vm.error != null, enter = fadeIn(), exit = fadeOut()) {
                 ErrorBanner(vm.error ?: "", onClose = { vm.clearError() })
             }
             Box(Modifier.weight(1f)) {
-                if (wide) WideLayout(vm) else CompactLayout(vm)
+                if (showAccess) AccessScreen(onClose = { showAccess = false })
+                else if (wide) WideLayout(vm) else CompactLayout(vm)
             }
             StatusLine(vm.status)
         }
@@ -441,7 +454,7 @@ fun App(vm: HubVm) {
 }
 
 @Composable
-private fun HubHeader(vm: HubVm, onRefresh: () -> Unit, onSettings: () -> Unit) {
+private fun HubHeader(vm: HubVm, onRefresh: () -> Unit, onSettings: () -> Unit, onAccess: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -449,34 +462,45 @@ private fun HubHeader(vm: HubVm, onRefresh: () -> Unit, onSettings: () -> Unit) 
             .statusBarsPadding()
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 14.dp),
+            // 2 dp снаружи: у строк текста уже есть внутренний leading, визуально это 8 dp воздуха
+            Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Logo()
-            Spacer(Modifier.width(12.dp))
+            Logo(28.dp)
+            Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     "DSH Federation",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
+                    style = TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false)),
+                    fontSize = 16.sp,
+                    lineHeight = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = Ink,
-                    letterSpacing = 0.3.sp
-                )
-                Text(
-                    when (screenOf(vm)) {
-                        Screen.NODES -> "хаб · ${hubHost(vm.baseUrl)}"
-                        Screen.SESSIONS -> "сессии · ${vm.selectedNode?.name ?: "узел"}"
-                        Screen.CHAT -> "переписка · ${nodeName(vm, vm.selectedSession?.node)}"
-                    },
-                    fontSize = 11.5.sp,
-                    color = InkDim,
+                    letterSpacing = 0.2.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                Text(
+                    when (screenOf(vm)) {
+                        Screen.NODES -> "хаб · ${shortHost(hubHost(vm.baseUrl))}"
+                        Screen.SESSIONS -> "сессии · ${vm.selectedNode?.name ?: "узел"}"
+                        Screen.CHAT -> "переписка · ${nodeName(vm, vm.selectedSession?.node)}"
+                    },
+                    style = TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false)),
+                    fontSize = 10.5.sp,
+                    lineHeight = 13.sp,
+                    color = InkDim,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
-            CircleIcon(Icons.Default.Refresh, "Обновить", onRefresh)
-            Spacer(Modifier.width(8.dp))
-            CircleIcon(Icons.Default.Settings, "Подключение", onSettings)
+            Spacer(Modifier.width(4.dp))
+            CircleIcon(Icons.Default.Lock, "Доступ", onAccess, size = 30.dp)
+            Spacer(Modifier.width(4.dp))
+            CircleIcon(Icons.Default.Refresh, "Обновить", onRefresh, size = 30.dp)
+            Spacer(Modifier.width(4.dp))
+            CircleIcon(Icons.Default.Settings, "Подключение", onSettings, size = 30.dp)
         }
         Box(
             Modifier.fillMaxWidth().height(1.dp)
@@ -486,48 +510,61 @@ private fun HubHeader(vm: HubVm, onRefresh: () -> Unit, onSettings: () -> Unit) 
 }
 
 @Composable
-private fun Logo() {
-    Canvas(Modifier.size(42.dp)) {
-        val r = size.minDimension / 2f
+private fun Logo(size: androidx.compose.ui.unit.Dp = 42.dp) {
+    Canvas(Modifier.size(size)) {
+        val k = this.size.minDimension / 42.dp.toPx()  // ритм глифа едет вместе с размером
+        val r = this.size.minDimension / 2f
         drawCircle(Brush.linearGradient(listOf(Accent, Accent2)), radius = r)
         val pts = listOf(
-            Offset(size.width * 0.50f, size.height * 0.30f),
-            Offset(size.width * 0.29f, size.height * 0.70f),
-            Offset(size.width * 0.71f, size.height * 0.70f),
+            Offset(this.size.width * 0.50f, this.size.height * 0.30f),
+            Offset(this.size.width * 0.29f, this.size.height * 0.70f),
+            Offset(this.size.width * 0.71f, this.size.height * 0.70f),
         )
-        val ring = Stroke(width = 1.dp.toPx())
-        drawLine(Color(0xCC0A1020), pts[0], pts[1], strokeWidth = 2.2.dp.toPx(), cap = StrokeCap.Round)
-        drawLine(Color(0xCC0A1020), pts[1], pts[2], strokeWidth = 2.2.dp.toPx(), cap = StrokeCap.Round)
-        drawLine(Color(0xCC0A1020), pts[2], pts[0], strokeWidth = 2.2.dp.toPx(), cap = StrokeCap.Round)
-        pts.forEach { p -> drawCircle(Color.White, radius = 3.1.dp.toPx(), center = p) }
-        drawCircle(color = Color.White, radius = r - 1.dp.toPx(), style = ring)
+        val ring = Stroke(width = (1.dp.toPx() * k).coerceAtLeast(0.8f))
+        val line = (2.2.dp.toPx() * k).coerceAtLeast(1.4f)
+        drawLine(Color(0xCC0A1020), pts[0], pts[1], strokeWidth = line, cap = StrokeCap.Round)
+        drawLine(Color(0xCC0A1020), pts[1], pts[2], strokeWidth = line, cap = StrokeCap.Round)
+        drawLine(Color(0xCC0A1020), pts[2], pts[0], strokeWidth = line, cap = StrokeCap.Round)
+        pts.forEach { p -> drawCircle(Color.White, radius = (3.1.dp.toPx() * k).coerceAtLeast(2.2f), center = p) }
+        drawCircle(color = Color.White, radius = r - (1.dp.toPx() * k), style = ring)
     }
 }
 
 @Composable
-private fun CircleIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+private fun CircleIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    size: androidx.compose.ui.unit.Dp = 40.dp
+) {
     Box(
         Modifier
-            .size(40.dp)
+            .size(size)
             .clip(CircleShape)
             .background(Color(0x14FFFFFF))
             .border(1.dp, Edge, CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
-    ) { Icon(icon, contentDescription = label, tint = Ink, modifier = Modifier.size(19.dp)) }
+    ) { Icon(icon, contentDescription = label, tint = Ink, modifier = Modifier.size(size * 0.48f)) }
 }
 
 @Composable
-private fun MiniIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, accent: Boolean = false, onClick: () -> Unit) {
+private fun MiniIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    accent: Boolean = false,
+    size: androidx.compose.ui.unit.Dp = 34.dp,
+    onClick: () -> Unit
+) {
     Box(
         Modifier
-            .size(34.dp)
+            .size(size)
             .clip(CircleShape)
             .background(if (accent) Accent.copy(alpha = 0.18f) else Color(0x12FFFFFF))
             .border(1.dp, if (accent) Accent.copy(alpha = 0.55f) else Edge, CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
-    ) { Icon(icon, contentDescription = label, tint = if (accent) Accent else InkDim, modifier = Modifier.size(17.dp)) }
+    ) { Icon(icon, contentDescription = label, tint = if (accent) Accent else InkDim, modifier = Modifier.size(size * 0.58f)) }
 }
 
 @Composable
@@ -616,32 +653,32 @@ private fun WideLayout(vm: HubVm) {
 // ---------- панели ----------
 
 @Composable
-private fun PaneHeader(
+internal fun PaneHeader(
     title: String,
     onBack: (() -> Unit)? = null,
     actions: @Composable () -> Unit = {}
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(start = if (onBack != null) 4.dp else 16.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
+        Modifier.fillMaxWidth().padding(start = if (onBack != null) 2.dp else 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (onBack != null) {
             Box(
-                Modifier.size(36.dp).clip(CircleShape).clickable(onClick = onBack),
+                Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onBack),
                 contentAlignment = Alignment.Center
-            ) { Icon(Icons.Default.ArrowBack, "Назад", tint = InkDim, modifier = Modifier.size(18.dp)) }
+            ) { Icon(Icons.Default.ArrowBack, "Назад", tint = InkDim, modifier = Modifier.size(16.dp)) }
         }
         Text(
-            title, Modifier.weight(1f), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            title.uppercase(Locale.ROOT), Modifier.weight(1f), fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold,
             color = InkDim, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            letterSpacing = 0.6.sp
+            letterSpacing = 0.9.sp
         )
         actions()
     }
 }
 
 @Composable
-private fun PillButton(text: String, accent: Boolean = false, onClick: () -> Unit) {
+internal fun PillButton(text: String, accent: Boolean = false, onClick: () -> Unit) {
     Box(
         Modifier
             .clip(RoundedCornerShape(50))
@@ -657,8 +694,10 @@ private fun PillButton(text: String, accent: Boolean = false, onClick: () -> Uni
 @Composable
 private fun NodesPane(vm: HubVm, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxWidth()) {
-        PaneHeader("УЗЛЫ · ${vm.nodes.size}") {
-            MiniIcon(Icons.Default.Refresh, "Обновить узлы") { vm.loadNodes() }
+        PaneHeader("Узлы") {
+            StatusPill("${vm.nodes.size}", Color(0xFF7C8CA8))
+            Spacer(Modifier.width(6.dp))
+            MiniIcon(Icons.Default.Refresh, "Обновить узлы", size = 24.dp) { vm.loadNodes() }
         }
         if (vm.nodes.isEmpty()) {
             EmptyState(
@@ -670,7 +709,7 @@ private fun NodesPane(vm: HubVm, modifier: Modifier = Modifier) {
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(vm.nodes, key = { it.id }) { n ->
@@ -748,9 +787,9 @@ private fun SessionsPane(vm: HubVm, modifier: Modifier = Modifier) {
             vm.selectedNode?.name ?: "СЕССИИ",
             onBack = if (vm.selectedNode != null) ({ vm.closeNode() }) else null,
         ) {
-            MiniIcon(Icons.Default.Add, "Новая сессия", accent = true) { vm.createSession() }
+            MiniIcon(Icons.Default.Add, "Новая сессия", accent = true, size = 24.dp) { vm.createSession() }
             Spacer(Modifier.width(6.dp))
-            MiniIcon(Icons.Default.Refresh, "Обновить сессии") { vm.loadSessions() }
+            MiniIcon(Icons.Default.Refresh, "Обновить сессии", size = 24.dp) { vm.loadSessions() }
         }
         if (vm.sessions.isEmpty()) {
             EmptyState(
@@ -761,7 +800,7 @@ private fun SessionsPane(vm: HubVm, modifier: Modifier = Modifier) {
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(vm.sessions, key = { it.id }) { sess ->
@@ -827,7 +866,7 @@ private fun ChatPane(vm: HubVm, modifier: Modifier = Modifier) {
                 LazyColumn(
                     Modifier.fillMaxSize(),
                     state = listState,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(vm.messages.size) { i -> MessageBubble(vm.messages[i]) }
@@ -941,7 +980,7 @@ private fun Composer(vm: HubVm) {
 }
 
 @Composable
-private fun StatusPill(text: String, color: Color) {
+internal fun StatusPill(text: String, color: Color) {
     Box(
         Modifier
             .clip(RoundedCornerShape(50))
@@ -949,7 +988,7 @@ private fun StatusPill(text: String, color: Color) {
             .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(50))
             .padding(horizontal = 9.dp, vertical = 3.dp)
     ) {
-        Text(text, fontSize = 10.sp, color = color, fontWeight = FontWeight.Medium)
+        Text(text, fontSize = 10.5.sp, color = color, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -1038,6 +1077,10 @@ private fun nodeName(vm: HubVm, id: String?): String =
 
 private fun hubHost(base: String): String =
     base.removePrefix("https://").removePrefix("http://").trimEnd('/')
+
+/** Длинный адрес сжимаем по центру: «…88.35:18990». Полный виден в настройках. */
+private fun shortHost(host: String, keep: Int = 18): String =
+    if (host.length <= keep + 1) host else "…" + host.takeLast(keep)
 
 private fun shortOs(os: String): String {
     if (os.isBlank()) return ""

@@ -39,6 +39,54 @@
 `assets/phone-23122PCD1G-{nodes,sessions,chat}.png` и `assets/phone-FCP-N49-panes.png` сняты с живых
 устройств — в них узел `debian17`, 2 сессии и переписка.
 
+## 24.11 (продолжение): телефон как узел, прокси моделей, переименование
+
+Задание владельца: «лечи и доделывай, добавь в APK управление телефоном, перечитай ТЗ и роадмап,
+сопоставь со сделанным», потом — Shizuku, компактная шапка и переименование «dsh hub» → «DSH Federation».
+
+**P3a. Прокси моделей на хабе — открытый пункт «ответ на узле» закрыт.** `hub/src/llm-gateway.mjs`:
+узел монтирует штатный `@deepseek-ai/dsh-llm-deepseek-api-key` с `baseURL: http://<хаб>:18990/llm`,
+токен шлюза выдаёт хаб (`POST /api/federation/node/llm-token`, перевыдача гасит прежний). Наружу уходит
+токен аккаунта хаба из `.credentials.yaml`, на узле ключа провайдера нет; allowlist моделей — до апстрима,
+`403` + запись `llm.deny` в аудит, `usage` по узлу.
+
+Доказательство: `hub && npm test` → **16/16** (в том числе пара «запрещённая модель не доходит до
+провайдера, аудит пишется»); вживую — сессия создана из хаба, промпт принят, **ответ модели пришёл**:
+«Да, федерация после переименования жива…»; `GET /api/federation/llm/stats` → `node_8a602424`,
+`deepseek-flash`, 17 811 входных / 468 выходных токенов, `status 200`, 3 с.
+
+**P2c. Телефон как узел: приложение стало руками.** `DeviceService` (foreground, long-poll команд),
+`DshAccessibilityService` (дерево, скриншот через `takeScreenshot`, жесты, ввод, запуск),
+`ConfirmActivity` (подтверждение с таймаутом), `ShizukuBridge` (shell в режиме `full`), `AccessScreen`
+(режим, службы, политики, журнал, СТОП), 10 инструментов `phone_*` в плагине узла.
+
+Доказательство с ПК через хаб (не по adb):
+`phone_screenshot` → JPEG 720×1600 экрана HONOR; `phone_ui_tree` → фокус `…HWSettings`;
+`phone_tap {"text":"Wi-Fi"}` → дерево уже `com.android.settings.Settings$WifiSettingsActivity`;
+`phone_shell {"cmd":"id -u; getprop ro.product.model; echo gate-ok"}` → `{"stdout":"2000\nFCP-N49\ngate-ok","code":0}`
+через Shizuku после подтверждения на телефоне; на Redmi `shell` → `full-unavailable`, в `sandbox` любой
+инструмент → `no-permission`. Реестр: `device_14f41677 HONOR full true tools=7`,
+`device_192fc8f5 Xiaomi assist false tools=6`.
+
+**Врата P0-«-1» в минимальном виде:** `hub/test/gates.test.mjs`, 5 инвариантов — `usage` по узлу равен
+числу вызовов провайдера; перевыдача токена гасит старый; запрещённая модель не уходит наружу и попадает
+в аудит; телефон без устройства — `409`, неизвестный вид — `400`; снапшот одной сессии не подменяет другую.
+
+**Переименование.** GitHub: `rukazax/dsh_hub` → **`rukazax/dsh-federation`**; каталог
+`github/dsh_federation`; служба `dsh-federation.service` (старая снята), env `/etc/dsh/dsh-federation.env`;
+пакет плагина `@local/dsh-federation-node` (на узле переименован вместе с монтированием); заголовки
+README, баннера и дашборда. Ключи SharedPreferences в приложении оставлены прежними намеренно — иначе
+телефоны потеряли бы токен хаба при обновлении APK.
+
+**Честно открыто:**
+- HONOR ходит на хаб через `adb reverse` (`127.0.0.1:18990`), потому что VPN телефона (Amnezia) заворачивает
+  UID приложения в `tun0`; правильное лечение — исключение `192.168.88.35` в раздельном туннеле или пауза VPN.
+  Redmi ходит по обычному адресу.
+- На Redmi Shizuku не установлен: HyperOS рубит `adb install` (`INSTALL_FAILED_USER_RESTRICTED`), нужен
+  ручной шаг через файловый менеджер; поэтому `full` доказан на HONOR, Redmi честно живёт в `assist`.
+- Из ТЗ ещё не сделано: approvals-релей (подтверждение хода агента из UI), матрица видимости сессий,
+  агрегаты статистики за 24 ч / 14 дней, второй узел и канареечный `federation-gate`.
+
 ## Что подтверждено на живой паре
 
 - `hello` + `index`: узел debian17 появился в хабе, сессия `session-5eaf7a57` создана **из хаба** командой `create`.
@@ -64,7 +112,7 @@
 
 | Пункт ТЗ | Состояние | Доказательство на этой машине |
 | --- | --- | --- |
-| Хаб-служба на этом ПК | готово | `systemctl is-active dsh-hub` → `active`; `curl 127.0.0.1:18990/healthz` → `{"ok":true,"proto":1,"nodes":1,"sessions":2,"commands":35}` |
+| Хаб-служба на этом ПК | готово | `systemctl is-active dsh-federation` → `active`; `curl 127.0.0.1:18990/healthz` → `{"ok":true,"proto":1,"nodes":1,"sessions":2,"commands":35}` |
 | Плагин-узел DSH | готово | узел `node_8a602424` (`debian17`) в `nodes`, `last_seen` свежий; `commands` исполняются (`state: done`), `snapshots` наполняются |
 | База Windows-ПК в общем RAG | готово | `memory_ingest`: 21 469 чанков, 29 099 дублей; `ctxdb.sqlite` 32 049 чанков, 14 проектов |
 | Все доступные телефоны | готово | Redmi 23122PCD1G + HONOR FCP-N49 по LAN; UI обоих показывает узел, Redmi — сессии и переписку |

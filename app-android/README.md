@@ -102,3 +102,20 @@ adb -s <serial> shell am start -n ru.dsh.hub/.MainActivity \
   узкая раскладка снята через `wm size` (эмуляция 360 dp), широкая — настоящая, 718 dp.
 - Пуш-уведомления, SSE-обновления в реальном времени, выбор модели и переименование
   сессии в клиент не входят — по заданию не требовались.
+
+## Shizuku и локальные AAR
+
+`dev.rikka.shizuku:{api,aidl,provider}:13.1.5` лежат в `app/libs/` (три AAR, Apache-2.0), зависимость —
+`fileTree("libs")`: с этого хоста `dl.google.com` недоступен, и Gradle вис на таймаутах, спрашивая `google()`
+первым. В `build.gradle.kts` рядом комментарием оставлены штатные координаты — на машине с нормальной сетью
+достаточно вернуть их и удалить `libs/`.
+
+Сборка без сети:
+
+```bash
+cd app-android && ANDROID_HOME=/srv/apps/dsh/android-sdk \
+  /srv/apps/dsh/gradle-8.9/bin/gradle --offline assembleDebug
+```
+
+Режим `full` (shell через Shizuku) требует запущенного сервиса Shizuku: приложение показывает команду,
+которую можно выполнить по adb, и кнопку запроса разрешения. Без Shizuku режим честно деградирует в `assist`.

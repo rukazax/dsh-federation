@@ -8,3 +8,5 @@ app-android/local.properties
 *.keystore
 node_modules/
 hub/federation.sqlite
+app-android/.kotlin/
+app-android/app/.kotlin/

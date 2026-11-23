@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">DSH Federation</string>
+    <string name="accessibility_service_description">Федерация DSH: по запросу хаба показать дерево экрана, снять скриншот, тапнуть, свайпнуть, ввести текст, открыть приложение. Каждое действие видно в журнале «Доступ» и в постоянном уведомлении. Ничего не делается само.</string>
 </resources>

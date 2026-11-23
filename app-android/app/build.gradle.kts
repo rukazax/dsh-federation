@@ -12,8 +12,8 @@ android {
         applicationId = "ru.dsh.hub"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 4
+        versionName = "0.4"
     }
 
     buildTypes {
@@ -46,5 +46,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.5")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.5")
     implementation("androidx.core:core-ktx:1.13.1")
+    // Shizuku 13.1.5 (api + aidl + provider). Артефакты лежат в app/libs: с этого хоста
+    // dl.google.com недоступен, а Gradle сначала спрашивает google() и висит на таймаутах.
+    // На чистой сети эти три строки заменяются обычными координатами:
+    //   implementation("dev.rikka.shizuku:api:13.1.5") / aidl / provider
+    implementation(fileTree("libs") { include("*.aar") })
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }
