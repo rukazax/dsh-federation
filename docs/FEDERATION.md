@@ -112,7 +112,25 @@ audit(id, ts, viewer, node, action, session, result, detail_json)
 Правила: деньги — `TEXT` с Decimal, ни одного `float`; `cost_usd = null`, если цены модели нет;
 `state` команды ∈ `queued|delivered|done|failed|expired`; `mode` узла ∈ `full|readonly|quarantine`.
 
-## 6. Безопасность
+## 6. Память: один общий RAG
+
+RAG федерации **не строится заново и не размножается по узлам**. На хабе уже работает общая память —
+`dsh-memory-hub` (ингест `session/event` всех чатов и воркспейсов, гибридный recall, дедуп по `hash`) и
+LightRAG 1.5.7 на `127.0.0.1:9621`. Узел присылает чанки в `POST /fed/v1/memory`, хаб кладёт их **в тот же
+индекс**, что и собственные сессии.
+
+- **Пометка, не копия.** Чанк несёт `workspace` (воркспейс на узле) и `node`; поиск по умолчанию сквозной
+  (`lightragCrossWorkspace`), сужение — фильтром по метке. Второго RAG на узел нет: иначе один и тот же
+  вопрос пришлось бы задавать трижды и получать три разных ответа.
+- **Скрытая сессия не индексируется.** Нет записи в индексе — нет находки и в поиске памяти, а не «есть, но
+  прячется в UI». Правило видимости проверяется на входе в ингест.
+- **`memory_ingest` — счётчик, не база.** Чанки/байты/дубли на узел в сутки: по нему видно отставание
+  бэкфилла, а не «всё хорошо».
+- **Obsidian — представление того же индекса**, а не отдельное хранилище: расхождение возможно только по
+  времени выгрузки.
+- **Бэкфилл безопасен:** повторная отправка идемпотентна по `hash`, старые сессии догоняются тем же роутом.
+
+## 7. Безопасность
 
 - **Токены.** Узлу выдаётся случайный токен при спаривании; на хабе хранится только `sha256`. Отзыв —
   удаление строки, узел получает `401` на следующем запросе.
@@ -126,7 +144,7 @@ audit(id, ts, viewer, node, action, session, result, detail_json)
 - **Данные не уезжают.** Личная федерация — только свои устройства; трансграничная передача не
   предусмотрена. Если когда-нибудь появится внешний арендатор — это отдельный контур и отдельные правила.
 
-## 7. Версии и совместимость
+## 8. Версии и совместимость
 
 - `proto: 1` в `hello`; неизвестная версия — отказ с текстом, а не молчаливое угадывание.
 - Версия DSH пиннится на хабе и узлах (`engines.dsh`), канареечный узел проверяет контракт до раскатки.
@@ -144,3 +162,10 @@ gated by an access mode (`sandbox`, `assist`, `full`) and a per-tool policy. Fai
 the reason instead of a silent miss. Security: hashed node tokens, one-time pairing codes, visibility enforced
 in every read path, full audit, and a model proxy that is the single gate for allowlists, budgets and rate
 limits. Money is stored as decimal text, never float; a missing price yields `cost_usd = null`.
+
+Memory stays one shared RAG, not one per node: the hub already runs `dsh-memory-hub` (ingests
+`session/event` from every chat and workspace, hash-deduped hybrid recall) plus LightRAG 1.5.7 on
+`127.0.0.1:9621`. A node posts chunks to `POST /fed/v1/memory` and the hub writes them into the **same**
+index, tagged with `workspace` and `node`, so a fact is found by one search instead of three. A hidden
+session is never ingested, so it cannot be found either; `memory_ingest` counts chunks/bytes/dupes per node
+per day to expose backfill lag, and Obsidian is a view of that index, not a second store.
