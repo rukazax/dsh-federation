@@ -399,10 +399,11 @@ test('телефон: регистрация по коду хаба, коман�
     const denyReq = call('POST', '/api/federation/phone', { kind: 'ui_tree', waitMs: 5000 }, 'HUB');
     await new Promise((r) => setTimeout(r, 150));
     const second = await call('GET', '/fed/v1/device/commands?cursor=1&wait=0', null, token);
-    await call('POST', '/fed/v1/device/reply', { commandId: second.body.commands[0].commandId, ok: false, error: 'mode-sandbox' }, token);
+    await call('POST', '/fed/v1/device/reply', { commandId: second.body.commands[0].commandId, ok: false, error: 'no-permission' }, token);
     const denied = await denyReq;
     assert.equal(denied.status, 422);
-    assert.equal(denied.body.error, 'mode-sandbox');
+    assert.equal(denied.body.error, 'no-permission', 'код ошибки устройства — канонический по ТЗ');
+    assert.equal(denied.body.tool, 'phone_ui_tree');
     assert.equal(denied.body.result, null);
   } finally {
     hub.close();

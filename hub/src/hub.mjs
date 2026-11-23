@@ -473,6 +473,22 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
   // ── Телефон как устройство (ТЗ P2c): регистрация, очередь команд, ожидание ответа.
   // Агент не получает прав устройства: он просит, приложение проверяет режим и политику.
   const PHONE_KINDS = ['screenshot', 'ui_tree', 'tap', 'swipe', 'text', 'key', 'launch', 'shell', 'stop'];
+  // Имена инструментов из ТЗ (docs/FEDERATION.md §4) → вид команды устройства.
+  // Один перевод на хабе: агенту привычны phone_*, а телефон слушает короткие виды.
+  const PHONE_TOOLS = {
+    phone_screenshot: 'screenshot', phone_ui_tree: 'ui_tree', phone_tap: 'tap',
+    phone_swipe: 'swipe', phone_type: 'text', phone_text: 'text',
+    phone_open_app: 'launch', phone_launch: 'launch', phone_key: 'key',
+    phone_shell: 'shell', phone_stop: 'stop'
+  };
+  // Коды ошибок устройства — канонические по ТЗ; чужой код не выдаём за понятный.
+  const PHONE_ERRORS = ['no-permission', 'needs-confirmation', 'unsupported-surface', 'full-unavailable', 'timeout', 'not-found'];
+  const phoneKind = (body) => {
+    const raw = String(body.tool || body.kind || '');
+    return PHONE_TOOLS[raw] || raw;
+  };
+  const phoneError = (code) => (PHONE_ERRORS.includes(String(code)) ? String(code) : 'failed');
+
   const deviceByToken = (req) => {
     const t = bearer(req);
     if (!t) return null;
@@ -1045,8 +1061,9 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       if (!row || row.device !== dev.id) return [404, { ok: false, error: 'unknown-command' }];
       if (row.state === 'queued' || row.state === 'sent') {
         const state = body.ok ? 'done' : 'error';
+        const code = body.error ? phoneError(body.error) : null;
         db.prepare('UPDATE device_commands SET state=?, result=?, error=?, done_at=? WHERE command_id=?')
-          .run(state, body.result === undefined ? null : JSON.stringify(body.result), body.error ? String(body.error) : null, iso(), row.command_id);
+          .run(state, body.result === undefined ? null : JSON.stringify(body.result), code, iso(), row.command_id);
         logAudit('device', dev.id, `phone.${row.kind}`, null, state, body.error ? { error: body.error } : undefined);
         settle(row.command_id, { commandId: row.command_id, kind: row.kind, ok: !!body.ok, result: body.result ?? null, error: body.error ?? null });
       }
@@ -1076,8 +1093,9 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       const who = caller(req);
       if (!who) return [401, { ok: false, error: 'hub-token-required' }];
       const body = await readJson(req);
-      const kind = String(body.kind || '');
+      const kind = phoneKind(body);
       if (!PHONE_KINDS.includes(kind)) return [400, { ok: false, error: `unknown-kind:${kind}`, allow: PHONE_KINDS }];
+      const args = body.args ?? body.payload ?? {};
       const now = Date.now();
       const devices = db.prepare('SELECT * FROM devices').all();
       const online = devices.filter((d) => now - Date.parse(d.last_seen) < 90_000);
@@ -1089,8 +1107,8 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       db.prepare(
         `INSERT INTO device_commands (command_id, device, kind, payload, created_at, expires_at, state)
          VALUES (?,?,?,?,?,?, 'queued')`
-      ).run(commandId, dev.id, kind, JSON.stringify(body.payload ?? {}), iso(), expiresAt);
-      logAudit(who.actor, dev.id, `phone.${kind}`, null, 'queued', body.payload ? { payload: body.payload } : undefined);
+      ).run(commandId, dev.id, kind, JSON.stringify(args), iso(), expiresAt);
+      logAudit(who.actor, dev.id, `phone.${kind}`, null, 'queued', Object.keys(args).length ? { args } : undefined);
       const waitMs = Math.min(90_000, Math.max(0, Number(body.waitMs ?? 15_000)));
       const value = waitMs ? await waitFor(commandId, waitMs) : null;
       const row = commandRow(commandId);
@@ -1098,7 +1116,10 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
       if (!value) {
         return [202, { ok: false, pending: true, commandId, device: dev.id, state: row.state, error: row.error || 'timeout' }];
       }
-      return [value.ok ? 200 : 422, { ok: value.ok, commandId, device: dev.id, kind, result: value.result, error: value.error }];
+      return [value.ok ? 200 : 422, {
+        ok: value.ok, commandId, device: dev.id, kind, tool: `phone_${kind}`,
+        result: value.result, error: value.error ? phoneError(value.error) : null
+      }];
     },
 
     'GET /api/federation/phone/result': (req, url) => {
