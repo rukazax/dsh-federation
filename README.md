@@ -131,6 +131,9 @@ flowchart LR
 ```
 
 - Ответ панели: заметки по разделам, объём последнего обзора, `updated_at`, полный текст обзора.
+- **Два режима одного расчёта.** `?format=svg` отдаёт ту же картину вектором (3,5 КБ на 9 649 заметок):
+  масштабируется без потерь, годится для панели, GitHub и телеграма. Файл
+  `assets/vault-overview.svg` в репозитории — вывод `--overview-svg` по живой базе, а не рисунок руками.
 - Vault не смонтирован → `available:false`, `reason:"vault-missing"`; панель пишет «база недоступна», а не
   пустой экран и не `500`.
 - Скрытая сессия в индекс не попадает, поэтому её нет и в обзоре — правило видимости одно на все пути.
@@ -157,8 +160,16 @@ flowchart LR
 
 ```bash
 cd hub
-npm test                                   # 2/2 pass
-node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite
+npm test                                   # 6/6 pass
+node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite \
+  --vault /srv/apps/dsh/obsidian/vault
+```
+
+```bash
+# обзор базы: JSON для панели, тот же расчёт картинкой и файлом
+curl -s 'localhost:18990/api/federation/memory/overview'
+curl -s 'localhost:18990/api/federation/memory/overview?format=svg' > vault.svg
+node src/hub.mjs --vault /srv/apps/dsh/obsidian/vault --overview-svg assets/vault-overview.svg
 ```
 
 ```bash
@@ -212,8 +223,10 @@ question, one answer, not one per device.
 The dashboard shows the base as numbers, not vibes. The "Base overview" panel reads the latest
 `Аналитика/analysis-*.md` written by `memory_analyze`, counts notes per section locally (no LLM call on open),
 and offers an explicit refresh button. A missing vault answers `available:false` with `reason:"vault-missing"`
-instead of a blank screen or a 500. Hidden sessions are never ingested, so they are absent from the overview
-too — one visibility rule for every read path.
+instead of a blank screen or a 500. The same computation also renders as SVG (`?format=svg`, ~3.5 KB for
+9,649 notes) so the panel, GitHub and Telegram get a lossless picture; the committed
+`assets/vault-overview.svg` is CLI output over the live vault, not a hand drawing. Hidden sessions are
+never ingested, so they are absent from the overview too — one visibility rule for every read path.
 
 ### Foldables
 

@@ -25,9 +25,9 @@
 | узел → хаб | `POST /fed/v1/memory` | пачка чанков: kind, project, session, hash, text |
 | узел → хаб | `GET /fed/v1/stream?cursor=N` | SSE: `command`, `node-refresh`; `Last-Event-ID` |
 | узел → хаб | `POST /fed/v1/reply` | `{commandId, ok, result}` — идемпотентно |
-| UI → хаб | `GET /api/federation/nodes|sessions|session/:id|stats|audit` | JSON |
-| UI → хаб | `GET /api/federation/memory/overview` | JSON: заметки по разделам + последний обзор `Аналитика/analysis-*.md` |
-| UI → хаб | `POST /api/federation/prompt|cancel|rename|perms` | JSON → `commandId` |
+| UI → хаб | `GET /api/federation/nodes\|sessions\|session/:id\|stats\|audit` | JSON |
+| UI → хаб | `GET /api/federation/memory/overview[?format=svg]` | JSON: заметки по разделам + последний обзор `Аналитика/analysis-*.md`; `format=svg` — та же картинка (`image/svg+xml`) |
+| UI → хаб | `POST /api/federation/prompt\|cancel\|rename\|perms` | JSON → `commandId` |
 | LLM узла → хаб | `POST /fed/v1/llm/stream` | стрим, `model` сверяется с allowlist узла |
 
 Правила:
@@ -150,6 +150,9 @@ flowchart LR
 
 - **Дёшево по умолчанию.** Панель открывается без вызова модели: 9 649 заметок пересчитываются локально
   за миллисекунды, а анализ стоит токенов — поэтому он по кнопке, а не на каждый показ.
+- **Два режима одного расчёта.** JSON — для панели, `?format=svg` — тот же обзор вектором: 3,5 КБ на
+  9 649 заметок, масштабирование без потерь, годится для вставки в GitHub и телеграм. Файл
+  `assets/vault-overview.svg` в репозитории — вывод `--overview-svg` по живой базе, а не рисунок руками.
 - **Пропавший vault — не 500.** `/srv/apps/dsh/obsidian/vault` не смонтирован или переехал: ответ
   `available:false, reason:"vault-missing"`, панель честно пишет «база недоступна» вместо пустого экрана.
 - **Один источник правды.** Панель показывает ровно тот обзор, который лежит в vault; расхождение с
@@ -195,5 +198,7 @@ index, tagged with `workspace` and `node`, so a fact is found by one search inst
 session is never ingested, so it cannot be found either; `memory_ingest` counts chunks/bytes/dupes per node
 per day to expose backfill lag, and Obsidian is a view of that index, not a second store. The dashboard's "Base overview" panel calls `GET /api/federation/memory/overview`, which counts
 vault notes per section and returns the latest `Аналитика/analysis-*.md` verbatim: no LLM runs when the panel
-opens, and a missing vault answers `available:false` instead of a 500. Refreshing the overview is an explicit
-button that runs `memory_analyze` and re-reads the note.
+opens, and a missing vault answers `available:false` instead of a 500. The same computation also renders as vector
+graphics via `?format=svg` (`image/svg+xml`, ~3.5 KB for 9,649 notes) or to a file with `--overview-svg`, so
+the panel, GitHub and Telegram share one lossless picture. Refreshing the overview is an explicit button
+that runs `memory_analyze` and re-reads the note.

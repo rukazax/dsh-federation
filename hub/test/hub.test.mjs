@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHub, vaultOverview } from '../src/hub.mjs';
+import { createHub, overviewSvg, vaultOverview } from '../src/hub.mjs';
 
 async function started(hub) {
   await new Promise((r) => hub.server.listen(0, '127.0.0.1', r));
@@ -148,4 +148,57 @@ test('пропавшая папка vault: available=false, а не 500', async 
   } finally {
     hub.close();
   }
+});
+
+test('векторный обзор: SVG с живыми числами и экранированием', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vault-'));
+  const vault = join(dir, 'vault');
+  try {
+    mkdirSync(join(vault, 'Facts'), { recursive: true });
+    mkdirSync(join(vault, 'Аналитика'), { recursive: true });
+    writeFileSync(join(vault, 'Memory Hub.md'), '# x\n');
+    writeFileSync(join(vault, 'Facts', 'a.md'), '- a\n');
+    writeFileSync(join(vault, 'Facts', 'b.md'), '- b\n');
+    writeFileSync(join(vault, 'Facts', 'c.md'), '- c\n');
+    writeFileSync(join(vault, 'Аналитика', 'analysis-2026-11-24.md'), '# Обзор\n\n- 3 факта\n');
+
+    const hub = createHub({ hubToken: 'HUB', vaultPath: vault });
+    const { base } = await started(hub);
+    try {
+      const res = await fetch(`${base}/api/federation/memory/overview?format=svg`, {
+        headers: { authorization: 'Bearer HUB' }
+      });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type'), /image\/svg\+xml/);
+      const svg = await res.text();
+      assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+      assert.match(svg, /Обзор базы Obsidian/);
+      assert.match(svg, /Facts/);
+      assert.match(svg, />5</); // 5 заметок всего: 3 факта + обзор + Memory Hub.md
+      assert.match(svg, /analysis-2026-11-24\.md/);
+    } finally {
+      hub.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('векторный обзор: имена экранируются, пустая база — не падение', () => {
+  const svg = overviewSvg({
+    available: true,
+    vault: '/v & <x>',
+    notes: { total: 5, bySection: { 'a<b': 5 } },
+    analysis: null,
+    checked_at: '2026-11-23T19:05:51.339Z'
+  });
+  assert.ok(!svg.includes('<b>'), 'сырой тег из имени раздела не должен попасть в SVG');
+  assert.match(svg, /a&lt;b/);
+  assert.match(svg, /\/v &amp; &lt;x&gt;/);
+  assert.match(svg, /обзора ещё нет/);
+
+  const missing = overviewSvg({ available: false, reason: 'vault-missing', vault: null, notes: { total: 0, bySection: {} } });
+  assert.match(missing, /vault-missing/);
+  assert.match(missing, /нет доступа к vault/);
+  assert.ok(missing.length > 200);
 });

@@ -1,10 +1,11 @@
 // dsh_hub — хаб федерации, v0 (срез P0/P2): спаривание узлов, hello, приём index, выдача списков.
 // Стоит отдельным процессом на время разработки; в DSH монтируется как плагин позже.
 // Запуск: node src/hub.mjs --port 18990 --code ABCD --db ~/.dsh/federation.sqlite --vault /srv/apps/dsh/obsidian/vault
+// Обзор базы: --overview-svg out.svg | --overview-json out.json (пишет и выходит, без сервера)
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -38,10 +39,14 @@ CREATE INDEX IF NOT EXISTS sessions_by_node ON sessions(node);
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const iso = () => new Date().toISOString();
 
-function json(res, status, body) {
-  const buf = Buffer.from(JSON.stringify(body));
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': buf.length });
+function sendText(res, status, type, body) {
+  const buf = Buffer.from(body);
+  res.writeHead(status, { 'content-type': type, 'content-length': buf.length });
   res.end(buf);
+}
+
+function json(res, status, body) {
+  sendText(res, status, 'application/json; charset=utf-8', JSON.stringify(body));
 }
 
 function readJson(req, limit = 4 << 20) {
@@ -135,6 +140,71 @@ export function vaultOverview(vaultPath, excerptChars = 1600) {
   return { available: true, vault: vaultPath, notes, analysis, checked_at: iso() };
 }
 
+const esc = (v) =>
+  String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (n) => Number(n || 0).toLocaleString('ru-RU').replace(/\u00A0/g, ' ');
+
+// Векторный обзор базы: тот же расчёт, что и JSON, но собранный как SVG для панели дашборда,
+// GitHub и телеграма — картинка масштабируется без потерь и весит единицы килобайт.
+export function overviewSvg(ov, { width = 960, rowStep = 45 } = {}) {
+  const font = "ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif";
+  const mono = 'ui-monospace,SFMono-Regular,Menlo,monospace';
+  const head = (w, h, body) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="Обзор базы Obsidian">\n` +
+    `  <defs>\n    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#121a2e"/></linearGradient>\n` +
+    `    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7aa2ff"/><stop offset=".6" stop-color="#9d7bff"/><stop offset="1" stop-color="#4de2c5"/></linearGradient>\n` +
+    `  </defs>\n  <rect width="${w}" height="${h}" rx="18" fill="url(#bg)"/>\n  <rect x="1" y="1" width="${w - 2}" height="${h - 2}" rx="17" fill="none" stroke="#2b3a5c" stroke-width="2"/>\n` +
+    body + '</svg>\n';
+
+  const title = `<text x="40" y="56" font-family="${font}" font-size="26" font-weight="700" fill="#eaf0ff">Обзор базы Obsidian</text>\n`;
+  const sub = (line) => `<text x="40" y="84" font-family="${mono}" font-size="13" fill="#8ea0c8">${esc(line)}</text>\n`;
+
+  if (!ov || !ov.available) {
+    const w = width;
+    const body =
+      title +
+      sub('база недоступна · vault-missing') +
+      `<text x="40" y="150" font-family="${font}" font-size="34" font-weight="700" fill="#ffb4a2">${esc('нет доступа к vault')}</text>\n` +
+      `<text x="40" y="186" font-family="${mono}" font-size="14" fill="#a9b8dc">${esc(ov && ov.vault ? ov.vault : 'путь не задан')}</text>\n` +
+      `<text x="40" y="222" font-family="${font}" font-size="14" fill="#8ea0c8">Панель честно сообщает об этом вместо пустого экрана и HTTP 500.</text>\n`;
+    return head(w, 260, body);
+  }
+
+  const label = (name) => (name === '(root)' ? 'в корне vault' : name);
+  const rows = Object.entries(ov.notes.bySection || {})
+    .sort((a, b) => Math.max(b[1], 0) - Math.max(a[1], 0))
+    .slice(0, 8);
+  const max = Math.max(1, ...rows.map((r) => r[1]));
+  const barMax = width - 190 - 120;
+  const height = Math.max(430, 222 + rows.length * rowStep + 60);
+  const a = ov.analysis;
+
+  let body = title + sub(`GET /api/federation/memory/overview?format=svg · ${ov.vault} · ${ov.checked_at}`);
+  body +=
+    `<text x="40" y="150" font-family="${font}" font-size="44" font-weight="700" fill="#4de2c5">${esc(fmt(ov.notes.total))}</text>\n` +
+    `<text x="40" y="176" font-family="${font}" font-size="15" fill="#a9b8dc">заметок .md в базе</text>\n` +
+    `<text x="300" y="150" font-family="${font}" font-size="30" font-weight="700" fill="#eaf0ff">${esc(fmt(rows.length))}</text>\n` +
+    `<text x="300" y="176" font-family="${font}" font-size="15" fill="#a9b8dc">разделов</text>\n` +
+    `<text x="600" y="150" font-family="${font}" font-size="30" font-weight="700" fill="#eaf0ff">${esc(a ? fmt(a.chars) : '—')}</text>\n` +
+    `<text x="600" y="176" font-family="${font}" font-size="15" fill="#a9b8dc">знаков в последнем обзоре</text>\n` +
+    `<line x1="40" y1="198" x2="${width - 40}" y2="198" stroke="#2b3a5c" stroke-width="2"/>\n`;
+
+  rows.forEach(([name, count], i) => {
+    const y = 222 + i * rowStep;
+    const w = Math.max(8, Math.round((count / max) * barMax));
+    body +=
+      `<text x="40" y="${y + 16}" font-family="${font}" font-size="15" fill="#dfe7ff">${esc(label(name))}</text>\n` +
+      `<rect x="190" y="${y}" width="${w}" height="22" rx="6" fill="url(#bar)"/>\n` +
+      `<text x="${width - 158}" y="${y + 16}" font-family="${mono}" font-size="15" fill="#9fb2d8">${esc(fmt(count))}</text>\n`;
+  });
+
+  const foot = a
+    ? `последний обзор: ${a.name} · ${fmt(a.chars)} знаков · ${a.updated_at}`
+    : 'обзора ещё нет: Аналитика/ пуста, кнопка «Обновить обзор» его создаст';
+  body += `<text x="40" y="${height - 26}" font-family="${mono}" font-size="12" fill="#8ea0c8">${esc(foot)}</text>\n`;
+  return head(width, height, body);
+}
+
 export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', vaultPath = process.env.DSH_OBSIDIAN_VAULT || '' } = {}) {
   const db = new DatabaseSync(dbPath);
   db.exec(SCHEMA);
@@ -216,7 +286,13 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
     'GET /api/federation/memory/overview': (req, url) => {
       if (hubToken && bearer(req) !== hubToken) return [401, { ok: false, error: 'hub-token-required' }];
       const dir = url.searchParams.get('vault') || vaultPath;
-      return [200, { ok: true, ...vaultOverview(dir) }];
+      const ov = vaultOverview(dir);
+      if ((url.searchParams.get('format') || '').toLowerCase() === 'svg') {
+        // ponytail: SVG собирается на каждый запрос, без кэша — база 9,6k заметок считается за ~10 мс;
+        // кэш по mtime добавим, если панель начнёт дёргать маршрут чаще раза в секунду.
+        return [200, overviewSvg(ov), 'image/svg+xml; charset=utf-8'];
+      }
+      return [200, { ok: true, ...ov }];
     },
 
     'GET /api/federation/sessions': (req, url) => {
@@ -236,7 +312,8 @@ export function createHub({ dbPath = ':memory:', pairCode = '', hubToken = '', v
     if (!handler) return json(res, 404, { ok: false, error: 'not-found' });
     try {
       const out = await handler(req, url);
-      json(res, out[0], out[1]);
+      if (out[2]) sendText(res, out[0], out[2], out[1]);
+      else json(res, out[0], out[1]);
     } catch (e) {
       json(res, e.status || 500, { ok: false, error: e.message });
     }
@@ -255,6 +332,20 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const code = arg('code', '');
   const hubToken = arg('hub-token', '');
   const vaultPath = arg('vault', process.env.DSH_OBSIDIAN_VAULT || '');
+  const svgOut = arg('overview-svg', '');
+  const jsonOut = arg('overview-json', '');
+  if (svgOut || jsonOut) {
+    const ov = vaultOverview(vaultPath);
+    if (svgOut) {
+      writeFileSync(svgOut, overviewSvg(ov));
+      console.log(`svg ${svgOut} notes=${ov.notes.total} sections=${Object.keys(ov.notes.bySection).length}`);
+    }
+    if (jsonOut) {
+      writeFileSync(jsonOut, JSON.stringify({ ok: true, ...ov }, null, 2));
+      console.log(`json ${jsonOut} available=${ov.available}`);
+    }
+    process.exit(0);
+  }
   const hub = createHub({ dbPath, pairCode: code, hubToken, vaultPath });
   hub.server.listen(port, '127.0.0.1', () => {
     console.log(`dsh_hub listening http://127.0.0.1:${port} db=${dbPath} pair=${code ? 'on' : 'OFF'}`);
