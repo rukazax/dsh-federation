@@ -29,7 +29,9 @@
 | узел → хаб | `POST /fed/v1/reply` | `{commandId, ok, result}` — идемпотентно |
 | UI → хаб | `GET /api/federation/nodes\|sessions\|session/:id\|stats\|audit` | JSON |
 | UI → хаб | `GET /api/federation/memory/overview[?format=svg]` | JSON: заметки по разделам + последний обзор `Аналитика/analysis-*.md`; `format=svg` — та же картинка (`image/svg+xml`) |
-| UI → хаб | `POST /api/federation/prompt\|cancel\|rename\|perms` | JSON → `commandId` |
+| UI → хаб | `POST /api/federation/prompt\|cancel\|rename\|create` | JSON → `commandId` (модель в `prompt.model`) |
+| UI → хаб | `GET /api/federation/command?id=` | состояние команды и её результат (для `create` — `sessionId`) |
+| UI → хаб | `POST /api/federation/automation/apply` | `{node}` → `commandId`; `GET /api/federation/automation` — манифест и состояние узлов |
 | LLM узла → хаб | `POST /fed/v1/llm/stream` | стрим, `model` сверяется с allowlist узла |
 
 Правила:

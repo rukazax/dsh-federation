@@ -316,6 +316,8 @@ function dashboardHtml() {
 </main>
 <script>
 const $=(id)=>document.getElementById(id); let TOK=localStorage.getItem('hubToken')||''; let SEL=null;
+// ?token=… как у самого DSH Web: удобно открыть ссылку и не вводить токен руками
+const qTok=new URLSearchParams(location.search).get('token'); if(qTok){TOK=qTok;localStorage.setItem('hubToken',qTok);}
 $('tok').value=TOK;
 const api=async(p,o={})=>{const r=await fetch(p,{...o,headers:{'content-type':'application/json',authorization:'Bearer '+TOK,...(o.headers||{})}});
  if(!r.ok) throw new Error(r.status+' '+await r.text()); return r.json();};

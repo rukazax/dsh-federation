@@ -74,6 +74,13 @@ data class HubNode(val id: String, val name: String, val os: String, val lastSee
 data class HubSession(val id: String, val node: String, val title: String, val status: String, val updatedAt: String)
 data class HubMsg(val role: String, val text: String, val at: String)
 
+// JSON null не должен попадать в интерфейс строкой "null".
+private fun s(o: JSONObject, key: String, fallback: String = ""): String {
+    if (o.isNull(key)) return fallback
+    val v = o.optString(key, fallback)
+    return if (v.isBlank()) fallback else v
+}
+
 // ---------- HTTP ----------
 
 object HubApi {
@@ -169,7 +176,7 @@ class HubVm(app: Application) : AndroidViewModel(app) {
         val arr = HubApi.request(baseUrl, token, "/api/federation/nodes").optJSONArray("nodes") ?: JSONArray()
         nodes = (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
-            HubNode(o.optString("id"), o.optString("name", "(без имени)"), o.optString("os"), o.optString("last_seen"))
+            HubNode(s(o, "id"), s(o, "name", "(без имени)"), s(o, "os"), s(o, "last_seen"))
         }
         "Узлов: ${nodes.size}"
     }
@@ -189,16 +196,19 @@ class HubVm(app: Application) : AndroidViewModel(app) {
         messages = emptyList()
     }
 
-    fun loadSessions(nodeId: String = selectedNode?.id ?: return) = task("Загружаю сессии…") {
-        val arr = HubApi.request(baseUrl, token, "/api/federation/sessions?node=$nodeId").optJSONArray("sessions") ?: JSONArray()
+    fun loadSessions(nodeId: String? = null) {
+        val id = nodeId ?: selectedNode?.id ?: return
+        task("Загружаю сессии…") {
+            val arr = HubApi.request(baseUrl, token, "/api/federation/sessions?node=$id").optJSONArray("sessions") ?: JSONArray()
         sessions = (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
             HubSession(
-                o.optString("id"), o.optString("node"),
-                o.optString("title", "(без названия)"), o.optString("status"), o.optString("updated_at")
+                s(o, "id"), s(o, "node"),
+                s(o, "title", "(без названия)"), s(o, "status", "?"), s(o, "updated_at")
             )
         }
-        "Сессий: ${sessions.size}"
+            "Сессий: ${sessions.size}"
+        }
     }
 
     fun selectSession(s: HubSession) {
@@ -227,13 +237,16 @@ class HubVm(app: Application) : AndroidViewModel(app) {
 
     private fun parseMsgs(arr: JSONArray): List<HubMsg> = (0 until arr.length()).map { i ->
         val o = arr.getJSONObject(i)
-        HubMsg(o.optString("role", "?"), o.optString("text", ""), o.optString("at", ""))
+        HubMsg(s(o, "role", "?"), s(o, "text"), s(o, "at"))
     }
 
-    fun loadMessages(s: HubSession = selectedSession ?: return, note: String = "Читаю переписку…") = task(note) {
-        val o = HubApi.request(baseUrl, token, "/api/federation/session?id=${s.id}&node=${s.node}")
-        messages = parseMsgs(o.optJSONArray("messages") ?: JSONArray())
-        "Сообщений: ${messages.size}"
+    fun loadMessages(s: HubSession? = null, note: String = "Читаю переписку…") {
+        val sess = s ?: selectedSession ?: return
+        task(note) {
+            val o = HubApi.request(baseUrl, token, "/api/federation/session?id=${sess.id}&node=${sess.node}")
+            messages = parseMsgs(o.optJSONArray("messages") ?: JSONArray())
+            "Сообщений: ${messages.size}"
+        }
     }
 
     fun sendPrompt() {
@@ -313,6 +326,14 @@ class MainActivity : ComponentActivity() {
 fun App(vm: HubVm) {
     val wide = LocalConfiguration.current.screenWidthDp >= 600
     var showSettings by rememberSaveable { mutableStateOf(vm.token.isBlank()) }
+    // Диалог открывается сам только пока токена нет; после подстановки (или ввода) он закрывается.
+    var autoOpened by rememberSaveable { mutableStateOf(vm.token.isBlank()) }
+    LaunchedEffect(vm.token) {
+        if (autoOpened && vm.token.isNotBlank()) {
+            showSettings = false
+            autoOpened = false
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -557,8 +578,9 @@ private fun EmptyHint(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 private fun SettingsDialog(vm: HubVm, onClose: () -> Unit) {
-    var base by rememberSaveable { mutableStateOf(vm.baseUrl) }
-    var tok by rememberSaveable { mutableStateOf(vm.token) }
+    // Поля берут актуальные значения при каждом открытии диалога (ключи rememberSaveable).
+    var base by rememberSaveable(vm.baseUrl, vm.token) { mutableStateOf(vm.baseUrl) }
+    var tok by rememberSaveable(vm.baseUrl, vm.token) { mutableStateOf(vm.token) }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("Хаб и токен") },

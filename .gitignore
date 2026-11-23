@@ -1,3 +1,10 @@
+# сборка Android и прочий мусор тулчейна
+app-android/.gradle/
+app-android/build/
+app-android/app/build/
+app-android/local.properties
+.gitignore.bak
+*.apk
+*.keystore
 node_modules/
-*.sqlite
-*.sqlite-journal
+hub/federation.sqlite
